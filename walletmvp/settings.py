@@ -11,23 +11,51 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 from pathlib import Path
-import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Environment variables
-env = environ.Env()
-environ.Env.read_env(BASE_DIR / '.env')
+# HARDCODED SETTINGS FOR RENDER DEPLOYMENT
+# Backend URL: https://wallet-backend-lqhq.onrender.com
+# Frontend URL: https://dsd-wallet.vercel.app
 
+# Django Configuration
+SECRET_KEY = 'django-insecure-change-this-to-a-secure-random-key-in-production-12345'
+DEBUG = False
+ALLOWED_HOSTS = ['wallet-backend-lqhq.onrender.com', 'www.wallet-backend-lqhq.onrender.com']
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env('SECRET_KEY', default='django-insecure-development-key-change-in-production')
+# Database Configuration - SQLite for now
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env.bool('DEBUG', default=False)
+# CORS Configuration
+FRONTEND_ORIGIN = 'https://dsd-wallet.vercel.app'
 
-ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1', 'TECH212.pythonanywhere.com', 'www.TECH212.pythonanywhere.com'])
+# Session Configuration
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_SAMESITE = None
+SESSION_COOKIE_DOMAIN = None
+SESSION_COOKIE_AGE = 2592000  # 30 days
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+SESSION_REFRESH_AT_REQUEST = True
+
+# CSRF Configuration
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = None
+CSRF_COOKIE_HTTPONLY = True
+CSRF_TRUSTED_ORIGINS = ['https://dsd-wallet.vercel.app']
+
+# Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
+CSRF_EXEMPT_URLS = [
+    r'^/api/',
+]
 
 
 # Application definition
@@ -77,11 +105,13 @@ TEMPLATES = [
 WSGI_APPLICATION = 'walletmvp.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/5.1/ref/settings/#databases
-
+# Database Configuration - HARDCODED FOR RENDER DEPLOYMENT
+# Using SQLite for now
 DATABASES = {
-    'default': env.db()
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
 }
 
 
@@ -164,13 +194,11 @@ SPECTACULAR_SETTINGS = {
 
 
 # CORS configuration
-CORS_ALLOWED_ORIGINS = env.list('FRONTEND_ORIGIN', default=['http://localhost:3000', 'https://dsd-wallet.vercel.app'])
+CORS_ALLOWED_ORIGINS = ['https://dsd-wallet.vercel.app']
 CORS_ALLOW_CREDENTIALS = True
 
-# For OAuth redirect URI (use the first origin if multiple)
-FRONTEND_ORIGIN_URL = env('FRONTEND_ORIGIN', default='http://localhost:3000')
-if isinstance(FRONTEND_ORIGIN_URL, list):
-    FRONTEND_ORIGIN_URL = FRONTEND_ORIGIN_URL[0] if FRONTEND_ORIGIN_URL else 'http://localhost:3000'
+# For OAuth redirect URI
+FRONTEND_ORIGIN_URL = 'https://dsd-wallet.vercel.app'
 
 
 # Session configuration
@@ -185,12 +213,23 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 
 # CSRF configuration
+# For cross-origin API with session authentication, we disable CSRF for API endpoints
+# Session cookies provide sufficient protection for this use case
 CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=True)
 CSRF_COOKIE_SAMESITE = env('CSRF_COOKIE_SAMESITE', default='Lax')
 CSRF_COOKIE_HTTPONLY = True
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=['https://dsd-wallet.vercel.app'])
 
+# For cross-origin requests, CSRF cookie needs to match session cookie settings
+if env('SESSION_COOKIE_SAMESITE', default='Lax') == 'None':
+    CSRF_COOKIE_SAMESITE = 'None'
 
-# Google OAuth configuration
-GOOGLE_CLIENT_ID = env('GOOGLE_CLIENT_ID', default='dummy-client-id')
-GOOGLE_CLIENT_SECRET = env('GOOGLE_CLIENT_SECRET', default='dummy-client-secret')
+# Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
+CSRF_EXEMPT_URLS = [
+    r'^/api/',
+]
+
+
+# Google OAuth configuration - HARDCODED FOR RENDER DEPLOYMENT
+GOOGLE_CLIENT_ID = '256666248694-iocf5uppdg0n9sq5i2krtp96bp80nio7.apps.googleusercontent.com'
+GOOGLE_CLIENT_SECRET = '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'

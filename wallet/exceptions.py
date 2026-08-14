@@ -1,9 +1,22 @@
 from rest_framework.views import exception_handler
 from rest_framework.response import Response
 from rest_framework import status
+from django.http import JsonResponse
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def csrf_failure(request, reason=""):
+    """
+    Custom CSRF failure view that returns JSON instead of HTML.
+    This is needed for cross-origin requests where HTML redirect doesn't work.
+    """
+    logger.warning(f"CSRF failure: {reason} - Path: {request.path}")
+    return JsonResponse(
+        {'code': 'csrf_failed', 'message': 'CSRF token missing or invalid'},
+        status=status.HTTP_403_FORBIDDEN
+    )
 
 
 def custom_exception_handler(exc, context):

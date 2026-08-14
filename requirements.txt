@@ -7,3 +7,4 @@ google-auth==2.37.0
 google-auth-oauthlib==1.2.1
 django-ratelimit==4.1.0
 drf-spectacular==0.30.0
+gunicorn
