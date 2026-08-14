@@ -6,6 +6,7 @@ from rest_framework.throttling import UserRateThrottle
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -259,15 +260,19 @@ class AdminLoginView(APIView):
         username = serializer.validated_data['username']
         password = serializer.validated_data['password']
 
-        # Authenticate using username or email
-        user = authenticate(request, username=username, password=password)
-        
-        if not user:
+        # Authenticate using either the stored username or the email address.
+        # Django's default ModelBackend uses the custom model's USERNAME_FIELD,
+        # which is set to email in User, so username-only admin accounts fail here.
+        user = User.objects.filter(
+            Q(username__iexact=username) | Q(email__iexact=username)
+        ).first()
+
+        if not user or not user.check_password(password):
             return Response(
                 {'error': 'Invalid credentials'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
-        
+
         # Check if user is staff
         if not user.is_staff:
             return Response(
