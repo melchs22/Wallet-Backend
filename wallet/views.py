@@ -817,6 +817,7 @@ class NotificationListView(APIView):
         from rest_framework.pagination import CursorPagination
         paginator = CursorPagination()
         paginator.page_size = 20
+        paginator.ordering = '-created_at'
         paginated_notifications = paginator.paginate_queryset(notifications, request)
         
         serializer = NotificationSerializer(paginated_notifications, many=True)
@@ -877,6 +878,7 @@ class TransactionListView(APIView):
         # Apply cursor pagination
         paginator = CursorPagination()
         paginator.page_size = 20
+        paginator.ordering = '-created_at'
         paginated_transactions = paginator.paginate_queryset(transactions, request)
         
         serializer = TransactionSerializer(paginated_transactions, many=True, context={'request': request})
