@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    GoogleAuthView, logout_view, MeView, UserResolveView,
+    GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView,
     TransferView, NotificationListView, NotificationDetailView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView
@@ -9,6 +9,7 @@ from .views import (
 urlpatterns = [
     # Authentication
     path('auth/google', GoogleAuthView.as_view(), name='google_auth'),
+    path('csrf', csrf_cookie_view, name='csrf_cookie'),
     path('auth/logout', logout_view, name='logout'),
     path('me', MeView.as_view(), name='me'),
     

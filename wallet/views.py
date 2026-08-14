@@ -4,6 +4,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 from django.contrib.auth import logout, login
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.db import transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -199,6 +200,18 @@ class GoogleAuthView(APIView):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+@extend_schema(
+    responses={200: dict},
+    tags=['Authentication']
+)
+@api_view(['GET'])
+@permission_classes([AllowAny])
+@ensure_csrf_cookie
+def csrf_cookie_view(request):
+    """Set a CSRF cookie for browser-based API requests."""
+    return Response({'detail': 'CSRF cookie set'}, status=status.HTTP_200_OK)
 
 
 @extend_schema(

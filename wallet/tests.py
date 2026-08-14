@@ -81,6 +81,13 @@ class WalletModelTest(TestCase):
         self.assertEqual(self.wallet.get_balance(), Decimal('50.00'))
 
 
+class CSRFEndpointTest(APITestCase):
+    def test_csrf_cookie_endpoint_sets_cookie(self):
+        response = self.client.get('/api/csrf')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('csrftoken', response.cookies)
+
+
 class SignupFlowTest(TransactionTestCase):
     def test_signup_creates_user_wallet_and_ledger_atomically(self):
         """Test that signup creates user, wallet, and zero-balance ledger entry together atomically"""

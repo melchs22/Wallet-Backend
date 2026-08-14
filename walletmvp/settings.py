@@ -10,10 +10,25 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def getenv_bool(key: str, default: bool) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.lower() in {'1', 'true', 'yes', 'on'}
+
+
+def getenv_list(key: str, default):
+    value = os.getenv(key)
+    if not value:
+        return default
+    return [item.strip() for item in value.split(',') if item.strip()]
 
 # HARDCODED SETTINGS FOR RENDER DEPLOYMENT
 # Backend URL: https://wallet-backend-lqhq.onrender.com
@@ -38,13 +53,13 @@ DATABASES = {
 }
 
 # CORS Configuration
-FRONTEND_ORIGIN = 'https://dsd-wallet.vercel.app'
+FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'https://dsd-wallet.vercel.app')
 
 # Session Configuration
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = getenv_bool('SESSION_COOKIE_SECURE', True)
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'None')
 SESSION_COOKIE_DOMAIN = None
 SESSION_COOKIE_AGE = 2592000  # 30 days
 SESSION_SAVE_EVERY_REQUEST = True
@@ -52,15 +67,17 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_REFRESH_AT_REQUEST = True
 
 # CSRF Configuration
-CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', True)
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'None')
 CSRF_COOKIE_HTTPONLY = True
-CSRF_TRUSTED_ORIGINS = [
-    'https://dsd-wallet.vercel.app',
-    'https://*.vercel.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-]
+CSRF_TRUSTED_ORIGINS = getenv_list(
+    'CSRF_TRUSTED_ORIGINS',
+    [
+        'https://dsd-wallet.vercel.app',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+    ],
+)
 
 # Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
@@ -204,25 +221,28 @@ SPECTACULAR_SETTINGS = {
 
 
 # CORS configuration
-CORS_ALLOWED_ORIGINS = [
-    'https://dsd-wallet.vercel.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-]
+CORS_ALLOWED_ORIGINS = getenv_list(
+    'CORS_ALLOWED_ORIGINS',
+    [
+        'https://dsd-wallet.vercel.app',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+    ],
+)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'https://.*\.vercel\.app$',
 ]
 CORS_ALLOW_CREDENTIALS = True
 
 # For OAuth redirect URI
-FRONTEND_ORIGIN_URL = 'https://dsd-wallet.vercel.app'
+FRONTEND_ORIGIN_URL = os.getenv('FRONTEND_ORIGIN_URL', 'https://dsd-wallet.vercel.app')
 
 
 # Session configuration
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = getenv_bool('SESSION_COOKIE_SECURE', True)
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'None')
 SESSION_COOKIE_DOMAIN = None  # Let browser determine domain
 SESSION_COOKIE_AGE = 2592000  # 30 days (30 * 24 * 60 * 60)
 SESSION_SAVE_EVERY_REQUEST = True
@@ -232,15 +252,17 @@ SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 # CSRF configuration
 # For cross-origin API with session authentication, we disable CSRF for API endpoints
 # Session cookies provide sufficient protection for this use case
-CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', True)
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'None')
 CSRF_COOKIE_HTTPONLY = True
-CSRF_TRUSTED_ORIGINS = [
-    'https://dsd-wallet.vercel.app',
-    'https://*.vercel.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-]
+CSRF_TRUSTED_ORIGINS = getenv_list(
+    'CSRF_TRUSTED_ORIGINS',
+    [
+        'https://dsd-wallet.vercel.app',
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+    ],
+)
 
 # Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
