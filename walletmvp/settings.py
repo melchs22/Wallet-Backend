@@ -164,6 +164,11 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = env.list('FRONTEND_ORIGIN', default=['http://localhost:3000', 'https://dsd-wallet.vercel.app'])
 CORS_ALLOW_CREDENTIALS = True
 
+# For OAuth redirect URI (use the first origin if multiple)
+FRONTEND_ORIGIN_URL = env('FRONTEND_ORIGIN', default='http://localhost:3000')
+if isinstance(FRONTEND_ORIGIN_URL, list):
+    FRONTEND_ORIGIN_URL = FRONTEND_ORIGIN_URL[0] if FRONTEND_ORIGIN_URL else 'http://localhost:3000'
+
 
 # Session configuration
 SESSION_COOKIE_HTTPONLY = True

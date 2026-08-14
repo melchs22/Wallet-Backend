@@ -15,10 +15,8 @@ urlpatterns = [
     # User resolution
     path('users/resolve', UserResolveView.as_view(), name='user_resolve'),
     
-    # Transfers
+    # Transfers (create transfer)
     path('transfers', TransferView.as_view(), name='transfer'),
-    path('transfers/<str:transaction_id>/reverse', ReversalView.as_view(), name='transaction_reverse'),
-    path('transactions/<str:transaction_id>', TransactionDetailView.as_view(), name='transaction_detail'),
     
     # Notifications
     path('notifications', NotificationListView.as_view(), name='notification_list'),
@@ -27,8 +25,12 @@ urlpatterns = [
     # Wallet
     path('wallet', WalletView.as_view(), name='wallet'),
     
-    # Transactions
+    # Transactions (list and detail)
     path('transactions', TransactionListView.as_view(), name='transaction_list'),
+    path('transactions/<str:transaction_id>', TransactionDetailView.as_view(), name='transaction_detail'),
+    
+    # Admin operations
+    path('transfers/<str:transaction_id>/reverse', ReversalView.as_view(), name='transaction_reverse'),
     
     # Account management
     path('me/close', CloseAccountView.as_view(), name='close_account'),

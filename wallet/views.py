@@ -3,12 +3,13 @@ from rest_framework.decorators import api_view, permission_classes, throttle_cla
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
-from django.contrib.auth import logout
+from django.contrib.auth import logout, login
 from django.db import transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 import requests
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -38,11 +39,17 @@ logger = logging.getLogger(__name__)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
+@extend_schema(
+    request=GoogleAuthRequestSerializer,
+    responses={200: TransferResponseSerializer, 400: dict},
+    tags=['Authentication']
+)
 class GoogleAuthView(APIView):
     """
     Google OAuth authentication using authorization code flow.
     """
     permission_classes = [AllowAny]
+    serializer_class = GoogleAuthRequestSerializer
 
     def post(self, request):
         serializer = GoogleAuthRequestSerializer(data=request.data)
@@ -77,7 +84,7 @@ class GoogleAuthView(APIView):
                     'code': code,
                     'client_id': settings.GOOGLE_CLIENT_ID,
                     'client_secret': settings.GOOGLE_CLIENT_SECRET,
-                    'redirect_uri': f"{settings.FRONTEND_ORIGIN[0] if settings.FRONTEND_ORIGIN else 'http://localhost:3000'}/auth/callback",
+                    'redirect_uri': f"{settings.FRONTEND_ORIGIN_URL}/auth/callback",
                     'grant_type': 'authorization_code'
                 }
             )
@@ -188,6 +195,10 @@ class GoogleAuthView(APIView):
             )
 
 
+@extend_schema(
+    responses={200: dict},
+    tags=['Authentication']
+)
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout_view(request):
@@ -198,11 +209,16 @@ def logout_view(request):
     return Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    responses={200: UserSerializer, 400: dict},
+    tags=['User']
+)
 class MeView(APIView):
     """
     Get (GET) or update (PATCH) the current user's profile and wallet summary.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = UserSerializer
 
     def get(self, request):
         """
@@ -277,12 +293,17 @@ class MeView(APIView):
             )
 
 
+@extend_schema(
+    responses={200: UserResolveSerializer, 404: dict},
+    tags=['User']
+)
 class UserResolveView(APIView):
     """
     Resolve a user by handle or email.
     Returns the same generic 404 for both "not found" and "inactive account" to prevent enumeration.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = UserResolveSerializer
 
     def get(self, request):
         query = request.query_params.get('query', '').strip()
@@ -334,12 +355,18 @@ def create_notification(user, notification_type, payload):
     )
 
 
+@extend_schema(
+    request=TransferRequestSerializer,
+    responses={200: TransferResponseSerializer, 400: dict},
+    tags=['Transfers']
+)
 class TransferView(APIView):
     """
     Send money to another user by handle.
     Implements idempotency and proper locking to prevent double-spending.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = TransferRequestSerializer
 
     def post(self, request):
         serializer = TransferRequestSerializer(data=request.data)
@@ -752,6 +779,7 @@ class NotificationListView(APIView):
     List notifications for the current user.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = NotificationSerializer
 
     def get(self, request):
         unread_only = request.query_params.get('unread_only', 'false').lower() == 'true'
@@ -776,6 +804,7 @@ class NotificationDetailView(APIView):
     Mark a notification as read.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = NotificationSerializer
 
     def post(self, request, id):
         try:
@@ -798,6 +827,7 @@ class WalletView(APIView):
     Get wallet details including balance and limits.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = WalletDetailSerializer
 
     def get(self, request):
         wallet = request.user.wallet
@@ -811,6 +841,7 @@ class TransactionListView(APIView):
     Uses cursor pagination for performance on growing tables.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = TransactionSerializer
 
     def get(self, request):
         from rest_framework.pagination import CursorPagination
@@ -835,6 +866,7 @@ class CloseAccountView(APIView):
     Notifications are left intact for closed accounts (historical access).
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = UserSerializer
 
     def post(self, request):
         user = request.user
@@ -877,6 +909,7 @@ class TransactionDetailView(APIView):
     Used for admin UI and user dispute resolution.
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = TransactionDetailSerializer
 
     def get(self, request, transaction_id):
         try:
@@ -906,6 +939,7 @@ class ReversalView(APIView):
     Creates offsetting ledger entries and logs the reason.
     """
     permission_classes = [IsAdminUser]
+    serializer_class = ReversalRequestSerializer
 
     def post(self, request, transaction_id):
         serializer = ReversalRequestSerializer(data=request.data)
