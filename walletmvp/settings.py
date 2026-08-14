@@ -22,7 +22,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Django Configuration
 SECRET_KEY = 'django-insecure-change-this-to-a-secure-random-key-in-production-12345'
 DEBUG = False
-ALLOWED_HOSTS = ['wallet-backend-lqhq.onrender.com', 'www.wallet-backend-lqhq.onrender.com']
+ALLOWED_HOSTS = [
+    'wallet-backend-lqhq.onrender.com',
+    'www.wallet-backend-lqhq.onrender.com',
+    'localhost',
+    '127.0.0.1',
+]
 
 # Database Configuration - SQLite for now
 DATABASES = {
@@ -39,7 +44,7 @@ FRONTEND_ORIGIN = 'https://dsd-wallet.vercel.app'
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = None
+SESSION_COOKIE_SAMESITE = 'None'
 SESSION_COOKIE_DOMAIN = None
 SESSION_COOKIE_AGE = 2592000  # 30 days
 SESSION_SAVE_EVERY_REQUEST = True
@@ -48,9 +53,14 @@ SESSION_REFRESH_AT_REQUEST = True
 
 # CSRF Configuration
 CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_SAMESITE = None
+CSRF_COOKIE_SAMESITE = 'None'
 CSRF_COOKIE_HTTPONLY = True
-CSRF_TRUSTED_ORIGINS = ['https://dsd-wallet.vercel.app']
+CSRF_TRUSTED_ORIGINS = [
+    'https://dsd-wallet.vercel.app',
+    'https://*.vercel.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
 
 # Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
@@ -194,7 +204,14 @@ SPECTACULAR_SETTINGS = {
 
 
 # CORS configuration
-CORS_ALLOWED_ORIGINS = ['https://dsd-wallet.vercel.app']
+CORS_ALLOWED_ORIGINS = [
+    'https://dsd-wallet.vercel.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r'https://.*\.vercel\.app$',
+]
 CORS_ALLOW_CREDENTIALS = True
 
 # For OAuth redirect URI
@@ -205,7 +222,7 @@ FRONTEND_ORIGIN_URL = 'https://dsd-wallet.vercel.app'
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = None
+SESSION_COOKIE_SAMESITE = 'None'
 SESSION_COOKIE_DOMAIN = None  # Let browser determine domain
 SESSION_COOKIE_AGE = 2592000  # 30 days (30 * 24 * 60 * 60)
 SESSION_SAVE_EVERY_REQUEST = True
@@ -216,9 +233,14 @@ SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 # For cross-origin API with session authentication, we disable CSRF for API endpoints
 # Session cookies provide sufficient protection for this use case
 CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_SAMESITE = None
+CSRF_COOKIE_SAMESITE = 'None'
 CSRF_COOKIE_HTTPONLY = True
-CSRF_TRUSTED_ORIGINS = ['https://dsd-wallet.vercel.app']
+CSRF_TRUSTED_ORIGINS = [
+    'https://dsd-wallet.vercel.app',
+    'https://*.vercel.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
 
 # Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
