@@ -186,7 +186,13 @@ class GoogleAuthView(APIView):
                 'is_new_user': is_new_user
             }
             
-            return Response(response_data, status=status.HTTP_200_OK)
+            response = Response(response_data, status=status.HTTP_200_OK)
+            
+            # Ensure session cookie is set properly
+            # Django's login() should handle this, but we force a session save
+            request.session.save()
+            
+            return response
             
         except Exception as e:
             return Response(
