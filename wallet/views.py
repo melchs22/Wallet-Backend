@@ -34,6 +34,7 @@ from decimal import Decimal
 from datetime import timedelta
 import uuid
 from django.db import models
+from .authentication import issue_access_token
 
 # Configure structured JSON logging
 logger = logging.getLogger(__name__)
@@ -184,7 +185,11 @@ class GoogleAuthView(APIView):
             response_data = {
                 'user': UserSerializer(user).data,
                 'wallet': WalletSerializer(wallet).data,
-                'is_new_user': is_new_user
+                'is_new_user': is_new_user,
+                # Browser privacy controls can reject Render's third-party session
+                # cookie when the app is served by Vercel.  Return a signed API
+                # token so the frontend can authenticate every API request.
+                'access_token': issue_access_token(user),
             }
             
             response = Response(response_data, status=status.HTTP_200_OK)

@@ -65,6 +65,7 @@ SESSION_COOKIE_AGE = 2592000  # 30 days
 SESSION_SAVE_EVERY_REQUEST = True
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_REFRESH_AT_REQUEST = True
+API_ACCESS_TOKEN_MAX_AGE = int(os.getenv('API_ACCESS_TOKEN_MAX_AGE', '28800'))
 
 # CSRF Configuration
 CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', True)
@@ -180,6 +181,9 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.CursorPagination',
     'PAGE_SIZE': 20,
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        # Prefer bearer auth: sessions are unreliable when the Vercel frontend
+        # calls this Render API because browsers may block third-party cookies.
+        'wallet.authentication.SignedTokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication',
     ],

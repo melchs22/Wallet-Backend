@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import login
 from .models import (
     User, Wallet, LedgerEntry, KYCTier, UserStatus, LedgerDirection, AuditLog,
-    Transaction, TransactionType, TransactionStatus, WalletStatus
+    Transaction, TransactionType, TransactionStatus, WalletStatus, Notification
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -73,7 +73,7 @@ class TransferResponseSerializer(serializers.Serializer):
 
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
-        model = 'wallet.Notification'
+        model = Notification
         fields = ['id', 'type', 'payload', 'read_at', 'created_at']
         read_only_fields = ['id', 'created_at']
 
@@ -133,11 +133,18 @@ class TransactionSerializer(serializers.ModelSerializer):
 class WalletDetailSerializer(serializers.ModelSerializer):
     balance = serializers.SerializerMethodField()
     send_limit_remaining_today = serializers.SerializerMethodField()
+    kyc_tier = serializers.CharField(source='user.kyc_tier', read_only=True)
+    send_limit_per_tx = serializers.DecimalField(
+        source='user.send_limit_per_tx', max_digits=20, decimal_places=2, read_only=True
+    )
+    send_limit_daily = serializers.DecimalField(
+        source='user.send_limit_daily', max_digits=20, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Wallet
         fields = [
-            'balance', 'currency', 'kyc_tier', 'send_limit_per_tx',
+            'id', 'balance', 'currency', 'status', 'kyc_tier', 'send_limit_per_tx',
             'send_limit_daily', 'send_limit_remaining_today'
         ]
         read_only_fields = fields
