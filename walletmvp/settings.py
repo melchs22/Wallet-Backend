@@ -204,8 +204,8 @@ FRONTEND_ORIGIN_URL = 'https://dsd-wallet.vercel.app'
 # Session configuration
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=True)
-SESSION_COOKIE_SAMESITE = env('SESSION_COOKIE_SAMESITE', default='Lax')
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_SAMESITE = None
 SESSION_COOKIE_DOMAIN = None  # Let browser determine domain
 SESSION_COOKIE_AGE = 2592000  # 30 days (30 * 24 * 60 * 60)
 SESSION_SAVE_EVERY_REQUEST = True
@@ -215,14 +215,10 @@ SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 # CSRF configuration
 # For cross-origin API with session authentication, we disable CSRF for API endpoints
 # Session cookies provide sufficient protection for this use case
-CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=True)
-CSRF_COOKIE_SAMESITE = env('CSRF_COOKIE_SAMESITE', default='Lax')
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = None
 CSRF_COOKIE_HTTPONLY = True
-CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=['https://dsd-wallet.vercel.app'])
-
-# For cross-origin requests, CSRF cookie needs to match session cookie settings
-if env('SESSION_COOKIE_SAMESITE', default='Lax') == 'None':
-    CSRF_COOKIE_SAMESITE = 'None'
+CSRF_TRUSTED_ORIGINS = ['https://dsd-wallet.vercel.app']
 
 # Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
