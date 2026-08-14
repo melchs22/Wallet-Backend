@@ -86,6 +86,9 @@ ALLOWED_HOSTS=TECH212.pythonanywhere.com,www.TECH212.pythonanywhere.com
 FRONTEND_ORIGIN=https://dsd-wallet.vercel.app
 SESSION_COOKIE_SECURE=True
 CSRF_COOKIE_SECURE=True
+SESSION_COOKIE_SAMESITE=None
+CSRF_COOKIE_SAMESITE=None
+CSRF_TRUSTED_ORIGINS=https://dsd-wallet.vercel.app
 
 # Google OAuth
 GOOGLE_CLIENT_ID=256666248694-iocf5uppdg0n9sq5i2krtp96bp80nio7.apps.googleusercontent.com
@@ -165,12 +168,13 @@ application = get_wsgi_application()
 1. In "Web" → "my_web_app", scroll to "Static files"
 2. Configure static file mapping:
    - URL: `/static/`
-   - Directory: `/home/TECH212/mysite/static/`
+   - Directory: `/home/TECH212/mysite/staticfiles/`
 
 3. In your Django `settings.py`, ensure:
 ```python
 STATIC_URL = '/static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
 ```
 
 ### Run Static Files Collection
@@ -178,7 +182,13 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 ```bash
 source ~/mysite/venv/bin/activate
 cd ~/mysite
-python manage.py collectstatic --noinput
+python manage.py collectstatic --noinput --clear
+```
+
+**Or use the provided script:**
+```bash
+cd ~/mysite
+./collect_static.sh
 ```
 
 ## Step 8: Run Database Migrations
