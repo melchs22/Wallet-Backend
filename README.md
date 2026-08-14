@@ -58,7 +58,27 @@ Required environment variables:
 python manage.py migrate
 ```
 
-### 4. Create a Superuser (Optional)
+### 4. Create Admin User
+
+The admin panel uses username/password authentication separate from Google OAuth. Create a default admin user:
+
+```bash
+python manage.py create_admin
+```
+
+This creates an admin user with:
+- Username: `TUTU`
+- Password: `tutu2005`
+- Email: `admin@kesho.wallet`
+- Staff privileges: Enabled
+
+You can also create custom admin users:
+
+```bash
+python manage.py create_admin --username YOUR_USERNAME --password YOUR_PASSWORD --email YOUR_EMAIL
+```
+
+For traditional Django admin access, you can also create a superuser:
 
 ```bash
 python manage.py createsuperuser
@@ -143,6 +163,40 @@ Copy the **Client ID** and **Client Secret** to your `.env` file as `GOOGLE_CLIE
 ### Account Management
 
 - `POST /api/me/close` - Close account (only if balance is zero)
+
+### Admin Panel (New)
+
+The admin panel provides a separate interface for administrative operations:
+
+#### Admin Authentication
+- `POST /api/auth/admin` - Admin login with username/password
+  - Body: `{ username, password }`
+
+#### Admin Dashboard
+- `GET /api/admin/dashboard` - Aggregate statistics (user counts, volume, pending requests, etc.)
+
+#### User Management
+- `GET /api/admin/users?query=&status=&cursor=` - Searchable, filterable user list
+- `GET /api/admin/users/<id>` - Full user details with recent activity
+- `PATCH /api/admin/users/<id>` - Update user status, wallet status, limits, KYC tier
+  - Body: `{ status?, wallet_status?, send_limit_per_tx?, send_limit_daily?, kyc_tier?, reason }`
+  - Note: All admin actions require a `reason` field for audit logging
+
+#### Transaction Oversight
+- `GET /api/admin/transactions?query=&status=&type=&cursor=` - Search across all transactions
+- `GET /api/admin/transactions/<id>` - Full transaction details
+- `POST /api/admin/transactions/<id>/reverse` - Reverse a transaction
+  - Body: `{ reason }`
+
+#### Fraud Review
+- `GET /api/admin/transfer-attempts?user=&reason=&cursor=` - View failed transfer attempts
+
+#### Audit Log
+- `GET /api/admin/audit-log?user=&action=&cursor=` - View all admin actions with full audit trail
+
+**Security Note**: All admin endpoints require `is_staff=True` and are server-side protected. The frontend admin panel is accessible at `/admin` in the Next.js application.
+
+**Responsiveness Note**: The admin panel is primarily designed for desktop/tablet use (768px+). While it remains usable on smaller screens, data tables may require horizontal scrolling on mobile devices. This is an intentional design decision as admin operations are typically performed on larger screens.
 
 ## Management Commands
 

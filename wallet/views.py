@@ -3,7 +3,7 @@ from rest_framework.decorators import api_view, permission_classes, throttle_cla
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
-from django.contrib.auth import logout, login
+from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.db import transaction
 from django.utils import timezone
@@ -20,20 +20,24 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
-    TransferAttempt
+    TransferAttempt, PaymentRequest
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
     UserResolveSerializer, TransferRequestSerializer, TransferResponseSerializer,
     NotificationSerializer, TransactionSerializer, WalletDetailSerializer,
     ProfileUpdateSerializer, generate_unique_handle, TransactionDetailSerializer,
-    ReversalRequestSerializer, ReversalResponseSerializer, TransferAttemptSerializer
+    ReversalRequestSerializer, ReversalResponseSerializer, TransferAttemptSerializer,
+    AdminLoginSerializer, AdminDashboardSerializer, AdminUserListSerializer,
+    AdminUserDetailSerializer, AdminUserUpdateSerializer, AdminTransactionListSerializer,
+    AdminAuditLogSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
 from datetime import timedelta
 import uuid
 from django.db import models
+from django.db.models import Sum, Q
 from .authentication import issue_access_token
 
 # Configure structured JSON logging
@@ -231,6 +235,75 @@ def logout_view(request):
     """
     logout(request)
     return Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@extend_schema(
+    request=AdminLoginSerializer,
+    responses={200: dict, 400: dict, 401: dict},
+    tags=['Authentication']
+)
+class AdminLoginView(APIView):
+    """
+    Admin login using username and password.
+    This is separate from the Google OAuth flow used by regular users.
+    """
+    permission_classes = [AllowAny]
+    serializer_class = AdminLoginSerializer
+
+    def post(self, request):
+        serializer = AdminLoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        username = serializer.validated_data['username']
+        password = serializer.validated_data['password']
+
+        # Authenticate using username or email
+        user = authenticate(request, username=username, password=password)
+        
+        if not user:
+            return Response(
+                {'error': 'Invalid credentials'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        # Check if user is staff
+        if not user.is_staff:
+            return Response(
+                {'error': 'Access denied. Admin privileges required.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if user account is active
+        if user.status != UserStatus.ACTIVE:
+            return Response(
+                {'error': 'Account is not active'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Log the user in
+        login(request, user)
+        
+        # Audit log for admin login
+        AuditLog.objects.create(
+            user=user,
+            action='admin_login',
+            metadata={'method': 'username_password'}
+        )
+        
+        wallet = user.wallet
+        
+        response_data = {
+            'user': UserSerializer(user).data,
+            'wallet': WalletDetailSerializer(wallet).data,
+            'access_token': issue_access_token(user),
+        }
+        
+        response = Response(response_data, status=status.HTTP_200_OK)
+        request.session.save()
+        
+        return response
 
 
 @extend_schema(
@@ -1072,3 +1145,540 @@ class ReversalView(APIView):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ============================================================================
+# ADMIN API ENDPOINTS
+# ============================================================================
+
+@extend_schema(
+    responses={200: AdminDashboardSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_dashboard(request):
+    """
+    Admin dashboard with aggregate statistics.
+    """
+    try:
+        # User counts by status
+        total_users = User.objects.count()
+        active_users = User.objects.filter(status=UserStatus.ACTIVE).count()
+        suspended_users = User.objects.filter(status=UserStatus.SUSPENDED).count()
+        closed_users = User.objects.filter(status=UserStatus.CLOSED).count()
+        
+        # Wallet counts
+        total_wallets = Wallet.objects.count()
+        frozen_wallets = Wallet.objects.filter(status=WalletStatus.FROZEN).count()
+        
+        # P2P volume
+        today = timezone.now().date()
+        week_ago = today - timedelta(days=7)
+        
+        p2p_volume_today = Transaction.objects.filter(
+            type=TransactionType.P2P_TRANSFER,
+            status=TransactionStatus.COMPLETED,
+            created_at__date=today
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        p2p_volume_week = Transaction.objects.filter(
+            type=TransactionType.P2P_TRANSFER,
+            status=TransactionStatus.COMPLETED,
+            created_at__date__gte=week_ago
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Pending payment requests
+        pending_payment_requests = PaymentRequest.objects.filter(
+            status=PaymentRequestStatus.PENDING
+        ).count()
+        
+        # Transfer attempt rejections in last 24h
+        twenty_four_hours_ago = timezone.now() - timedelta(hours=24)
+        transfer_attempt_rejections_24h = TransferAttempt.objects.filter(
+            created_at__gte=twenty_four_hours_ago
+        ).count()
+        
+        response_data = {
+            'total_users': total_users,
+            'active_users': active_users,
+            'suspended_users': suspended_users,
+            'closed_users': closed_users,
+            'total_wallets': total_wallets,
+            'p2p_volume_today': str(p2p_volume_today),
+            'p2p_volume_week': str(p2p_volume_week),
+            'pending_payment_requests': pending_payment_requests,
+            'frozen_wallets': frozen_wallets,
+            'transfer_attempt_rejections_24h': transfer_attempt_rejections_24h
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_dashboard_error',
+                'admin_user_id': str(request.user.id),
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: AdminUserListSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_users_list(request):
+    """
+    Admin user list with search and filtering.
+    """
+    try:
+        query = request.query_params.get('query', '').strip()
+        status_filter = request.query_params.get('status', '').strip()
+        cursor = request.query_params.get('cursor', '').strip()
+        
+        # Build queryset
+        users = User.objects.select_related('wallet').all()
+        
+        # Apply search
+        if query:
+            users = users.filter(
+                Q(handle__icontains=query) | 
+                Q(email__icontains=query) |
+                Q(display_name__icontains=query)
+            )
+        
+        # Apply status filter
+        if status_filter:
+            users = users.filter(status=status_filter)
+        
+        # Apply cursor pagination
+        from rest_framework.pagination import CursorPagination
+        paginator = CursorPagination()
+        paginator.page_size = 50
+        paginator.ordering = '-created_at'
+        
+        if cursor:
+            # For simplicity, we'll use offset-based pagination for this implementation
+            # In production, you'd want proper cursor-based pagination
+            try:
+                cursor_offset = int(cursor)
+                users = users[cursor_offset:]
+            except ValueError:
+                pass
+        
+        paginated_users = paginator.paginate_queryset(users, request)
+        serializer = AdminUserListSerializer(paginated_users, many=True)
+        
+        return paginator.get_paginated_response(serializer.data)
+        
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_users_list_error',
+                'admin_user_id': str(request.user.id),
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: AdminUserDetailSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_user_detail(request, user_id):
+    """
+    Admin user detail view.
+    """
+    try:
+        user = User.objects.select_related('wallet').prefetch_related(
+            'sent_transactions', 'received_transactions', 'transfer_attempts', 'linked_providers'
+        ).get(id=user_id)
+        
+        serializer = AdminUserDetailSerializer(user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+        
+    except User.DoesNotExist:
+        return Response(
+            {'error': 'User not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_user_detail_error',
+                'admin_user_id': str(request.user.id),
+                'target_user_id': user_id,
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request=AdminUserUpdateSerializer,
+    responses={200: AdminUserDetailSerializer, 400: dict},
+    tags=['Admin']
+)
+@api_view(['PATCH'])
+@permission_classes([IsAdminUser])
+def admin_user_update(request, user_id):
+    """
+    Admin user update with audit logging.
+    """
+    serializer = AdminUserUpdateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    reason = serializer.validated_data.get('reason')
+    if not reason:
+        return Response(
+            {'error': 'Reason is required for all admin actions'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(id=user_id)
+            wallet = user.wallet
+            
+            # Track changes for audit log
+            changes = {}
+            
+            # Update user status
+            if 'status' in serializer.validated_data:
+                old_status = user.status
+                new_status = serializer.validated_data['status']
+                if old_status != new_status:
+                    user.status = new_status
+                    changes['status'] = {'old': old_status, 'new': new_status}
+            
+            # Update wallet status
+            if 'wallet_status' in serializer.validated_data:
+                old_wallet_status = wallet.status
+                new_wallet_status = serializer.validated_data['wallet_status']
+                if old_wallet_status != new_wallet_status:
+                    wallet.status = new_wallet_status
+                    changes['wallet_status'] = {'old': old_wallet_status, 'new': new_wallet_status}
+            
+            # Update send limits
+            if 'send_limit_per_tx' in serializer.validated_data:
+                old_limit = user.send_limit_per_tx
+                new_limit = serializer.validated_data['send_limit_per_tx']
+                if old_limit != new_limit:
+                    user.send_limit_per_tx = new_limit
+                    changes['send_limit_per_tx'] = {'old': str(old_limit), 'new': str(new_limit)}
+            
+            if 'send_limit_daily' in serializer.validated_data:
+                old_limit = user.send_limit_daily
+                new_limit = serializer.validated_data['send_limit_daily']
+                if old_limit != new_limit:
+                    user.send_limit_daily = new_limit
+                    changes['send_limit_daily'] = {'old': str(old_limit), 'new': str(new_limit)}
+            
+            # Update KYC tier
+            if 'kyc_tier' in serializer.validated_data:
+                old_tier = user.kyc_tier
+                new_tier = serializer.validated_data['kyc_tier']
+                if old_tier != new_tier:
+                    user.kyc_tier = new_tier
+                    changes['kyc_tier'] = {'old': old_tier, 'new': new_tier}
+            
+            # Save changes
+            user.save()
+            wallet.save()
+            
+            # Create audit log entry
+            AuditLog.objects.create(
+                user=request.user,
+                action='admin_user_update',
+                metadata={
+                    'target_user_id': str(user.id),
+                    'target_user_handle': user.handle,
+                    'changes': changes,
+                    'reason': reason
+                }
+            )
+            
+            # Log the action
+            logger.info(
+                json.dumps({
+                    'event': 'admin_user_updated',
+                    'admin_user_id': str(request.user.id),
+                    'target_user_id': str(user.id),
+                    'changes': changes,
+                    'reason': reason,
+                    'timestamp': timezone.now().isoformat()
+                })
+            )
+        
+        # Return updated user data
+        user.refresh_from_db()
+        serializer = AdminUserDetailSerializer(user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+        
+    except User.DoesNotExist:
+        return Response(
+            {'error': 'User not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_user_update_error',
+                'admin_user_id': str(request.user.id),
+                'target_user_id': user_id,
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: AdminTransactionListSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_transactions_list(request):
+    """
+    Admin transaction list with search and filtering.
+    """
+    try:
+        query = request.query_params.get('query', '').strip()
+        status_filter = request.query_params.get('status', '').strip()
+        type_filter = request.query_params.get('type', '').strip()
+        cursor = request.query_params.get('cursor', '').strip()
+        
+        # Build queryset
+        transactions = Transaction.objects.select_related('sender', 'recipient').all()
+        
+        # Apply search (transaction ID, sender handle, recipient handle)
+        if query:
+            transactions = transactions.filter(
+                Q(id__icontains=query) |
+                Q(sender__handle__icontains=query) |
+                Q(recipient__handle__icontains=query)
+            )
+        
+        # Apply status filter
+        if status_filter:
+            transactions = transactions.filter(status=status_filter)
+        
+        # Apply type filter
+        if type_filter:
+            transactions = transactions.filter(type=type_filter)
+        
+        # Apply cursor pagination
+        from rest_framework.pagination import CursorPagination
+        paginator = CursorPagination()
+        paginator.page_size = 50
+        paginator.ordering = '-created_at'
+        
+        if cursor:
+            try:
+                cursor_offset = int(cursor)
+                transactions = transactions[cursor_offset:]
+            except ValueError:
+                pass
+        
+        paginated_transactions = paginator.paginate_queryset(transactions, request)
+        serializer = AdminTransactionListSerializer(paginated_transactions, many=True)
+        
+        return paginator.get_paginated_response(serializer.data)
+        
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_transactions_list_error',
+                'admin_user_id': str(request.user.id),
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: TransactionDetailSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_transaction_detail(request, transaction_id):
+    """
+    Admin transaction detail view.
+    """
+    try:
+        transaction_obj = Transaction.objects.select_related('sender', 'recipient').get(id=transaction_id)
+        serializer = TransactionDetailSerializer(transaction_obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+        
+    except Transaction.DoesNotExist:
+        return Response(
+            {'error': 'Transaction not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_transaction_detail_error',
+                'admin_user_id': str(request.user.id),
+                'transaction_id': transaction_id,
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: TransferAttemptSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_transfer_attempts(request):
+    """
+    Admin transfer attempt log with filtering.
+    """
+    try:
+        user_filter = request.query_params.get('user', '').strip()
+        reason_filter = request.query_params.get('reason', '').strip()
+        cursor = request.query_params.get('cursor', '').strip()
+        
+        # Build queryset
+        attempts = TransferAttempt.objects.select_related('user').all()
+        
+        # Apply user filter
+        if user_filter:
+            attempts = attempts.filter(
+                Q(user__handle__icontains=user_filter) |
+                Q(user__email__icontains=user_filter)
+            )
+        
+        # Apply reason filter
+        if reason_filter:
+            attempts = attempts.filter(rejection_reason__icontains=reason_filter)
+        
+        # Apply cursor pagination
+        from rest_framework.pagination import CursorPagination
+        paginator = CursorPagination()
+        paginator.page_size = 50
+        paginator.ordering = '-created_at'
+        
+        if cursor:
+            try:
+                cursor_offset = int(cursor)
+                attempts = attempts[cursor_offset:]
+            except ValueError:
+                pass
+        
+        paginated_attempts = paginator.paginate_queryset(attempts, request)
+        serializer = TransferAttemptSerializer(paginated_attempts, many=True)
+        
+        return paginator.get_paginated_response(serializer.data)
+        
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_transfer_attempts_error',
+                'admin_user_id': str(request.user.id),
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: AdminAuditLogSerializer},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_audit_log(request):
+    """
+    Admin audit log viewer with filtering.
+    """
+    try:
+        user_filter = request.query_params.get('user', '').strip()
+        action_filter = request.query_params.get('action', '').strip()
+        cursor = request.query_params.get('cursor', '').strip()
+        
+        # Build queryset
+        logs = AuditLog.objects.select_related('user').all()
+        
+        # Apply user filter
+        if user_filter:
+            logs = logs.filter(
+                Q(user__handle__icontains=user_filter) |
+                Q(user__email__icontains=user_filter)
+            )
+        
+        # Apply action filter
+        if action_filter:
+            logs = logs.filter(action__icontains=action_filter)
+        
+        # Apply cursor pagination
+        from rest_framework.pagination import CursorPagination
+        paginator = CursorPagination()
+        paginator.page_size = 50
+        paginator.ordering = '-created_at'
+        
+        if cursor:
+            try:
+                cursor_offset = int(cursor)
+                logs = logs[cursor_offset:]
+            except ValueError:
+                pass
+        
+        paginated_logs = paginator.paginate_queryset(logs, request)
+        serializer = AdminAuditLogSerializer(paginated_logs, many=True)
+        
+        return paginator.get_paginated_response(serializer.data)
+        
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                'event': 'admin_audit_log_error',
+                'admin_user_id': str(request.user.id),
+                'error': str(e),
+                'timestamp': timezone.now().isoformat()
+            })
+        )
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

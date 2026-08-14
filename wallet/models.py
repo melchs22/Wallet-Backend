@@ -12,13 +12,9 @@ def default_request_expiry():
 
 
 class CustomUserManager(BaseUserManager):
-    def create_user(self, email, google_sub, handle, display_name, **extra_fields):
+    def create_user(self, email, password=None, google_sub=None, handle=None, display_name=None, **extra_fields):
         if not email:
             raise ValueError('The Email field must be set')
-        if not google_sub:
-            raise ValueError('The Google sub field must be set')
-        if not handle:
-            raise ValueError('The Handle field must be set')
         
         email = self.normalize_email(email)
         user = self.model(
@@ -28,11 +24,16 @@ class CustomUserManager(BaseUserManager):
             display_name=display_name,
             **extra_fields
         )
-        user.set_password(None)  # No password for OAuth users
+        
+        if password:
+            user.set_password(password)
+        else:
+            user.set_password(None)  # No password for OAuth users
+        
         user.save(using=self._db)
         return user
 
-    def create_superuser(self, email, google_sub, handle, display_name, **extra_fields):
+    def create_superuser(self, email, password=None, google_sub=None, handle=None, display_name=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_active', True)
@@ -42,7 +43,42 @@ class CustomUserManager(BaseUserManager):
         if extra_fields.get('is_superuser') is not True:
             raise ValueError('Superuser must have is_superuser=True.')
 
-        return self.create_user(email, google_sub, handle, display_name, **extra_fields)
+        return self.create_user(email, password, google_sub, handle, display_name, **extra_fields)
+    
+    def create_admin_user(self, username, password, email, **extra_fields):
+        """
+        Create an admin user with username/password authentication.
+        This is separate from OAuth users and used for the admin panel.
+        """
+        if not username:
+            raise ValueError('The Username field must be set')
+        if not password:
+            raise ValueError('The Password field must be set')
+        if not email:
+            raise ValueError('The Email field must be set')
+        
+        email = self.normalize_email(email)
+        
+        # Set admin-specific defaults
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', False)  # Not necessarily superuser
+        extra_fields.setdefault('is_active', True)
+        
+        user = self.model(
+            email=email,
+            username=username,
+            handle=username,  # Use username as handle for admin users
+            display_name=username,
+            google_sub=None,  # No Google OAuth for admin users
+            **extra_fields
+        )
+        
+        # Ensure is_staff is set after creating the model instance
+        user.is_staff = True
+        
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
 
 
 class KYCTier(models.TextChoices):
@@ -91,7 +127,8 @@ class LedgerDirection(models.TextChoices):
 class User(AbstractUser):
     objects = CustomUserManager()
     
-    google_sub = models.CharField(max_length=255, unique=True, db_index=True)
+    username = models.CharField(max_length=150, unique=True, null=True, blank=True)  # Optional for OAuth, required for admin
+    google_sub = models.CharField(max_length=255, unique=True, null=True, blank=True, db_index=True)  # Optional for admin users
     email = models.EmailField(unique=True)
     handle = models.CharField(max_length=50, unique=True, db_index=True)
     display_name = models.CharField(max_length=255)
@@ -120,10 +157,10 @@ class User(AbstractUser):
     is_agent = models.BooleanField(default=False)  # B8: Agent flag for future cash network
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # No password field needed - Google OAuth only
-    username = None  # Disable the default username field
+    # For OAuth users, use email as USERNAME_FIELD
+    # For admin users, they can use username or email
     USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['google_sub', 'handle', 'display_name']
+    REQUIRED_FIELDS = []  # No required fields for OAuth users (they come from Google)
 
     class Meta:
         db_table = 'users'

@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import login
+from django.db import models
 from .models import (
     User, Wallet, LedgerEntry, KYCTier, UserStatus, LedgerDirection, AuditLog,
     Transaction, TransactionType, TransactionStatus, WalletStatus, Notification,
@@ -11,10 +12,12 @@ from decimal import Decimal
 
 
 class UserSerializer(serializers.ModelSerializer):
+    is_staff = serializers.BooleanField(read_only=True)
+    
     class Meta:
         model = User
-        fields = ['id', 'email', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status']
-        read_only_fields = ['id', 'kyc_tier', 'status']
+        fields = ['id', 'email', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff']
+        read_only_fields = ['id', 'kyc_tier', 'status', 'is_staff']
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -315,4 +318,128 @@ class ExchangeRateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExchangeRate
         fields = ['id', 'from_currency', 'to_currency', 'rate', 'source', 'valid_from', 'valid_until']
+        read_only_fields = fields
+
+
+class AdminLoginSerializer(serializers.Serializer):
+    """
+    Serializer for admin username/password login.
+    """
+    username = serializers.CharField(required=True)
+    password = serializers.CharField(required=True, write_only=True)
+
+
+class AdminDashboardSerializer(serializers.Serializer):
+    """
+    Serializer for admin dashboard statistics.
+    """
+    total_users = serializers.IntegerField()
+    active_users = serializers.IntegerField()
+    suspended_users = serializers.IntegerField()
+    closed_users = serializers.IntegerField()
+    total_wallets = serializers.IntegerField()
+    p2p_volume_today = serializers.DecimalField(max_digits=20, decimal_places=2)
+    p2p_volume_week = serializers.DecimalField(max_digits=20, decimal_places=2)
+    pending_payment_requests = serializers.IntegerField()
+    frozen_wallets = serializers.IntegerField()
+    transfer_attempt_rejections_24h = serializers.IntegerField()
+
+
+class AdminUserListSerializer(serializers.ModelSerializer):
+    """
+    Serializer for admin user list.
+    """
+    balance = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'handle', 'display_name', 'status', 'kyc_tier', 'balance', 'created_at']
+        read_only_fields = fields
+    
+    def get_balance(self, obj):
+        return str(obj.wallet.get_balance()) if hasattr(obj, 'wallet') else '0.00'
+
+
+class AdminUserDetailSerializer(serializers.ModelSerializer):
+    """
+    Serializer for admin user detail.
+    """
+    balance = serializers.SerializerMethodField()
+    wallet_status = serializers.CharField(source='wallet.status', read_only=True)
+    recent_transactions = serializers.SerializerMethodField()
+    recent_transfer_attempts = serializers.SerializerMethodField()
+    linked_providers = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'handle', 'display_name', 'avatar_url', 'status', 'kyc_tier',
+            'send_limit_per_tx', 'send_limit_daily', 'balance', 'wallet_status',
+            'is_staff', 'is_agent', 'created_at', 'recent_transactions', 
+            'recent_transfer_attempts', 'linked_providers'
+        ]
+        read_only_fields = ['id', 'created_at', 'is_staff']
+    
+    def get_balance(self, obj):
+        return str(obj.wallet.get_balance()) if hasattr(obj, 'wallet') else '0.00'
+    
+    def get_recent_transactions(self, obj):
+        from .models import Transaction
+        recent = Transaction.objects.filter(
+            models.Q(sender=obj) | models.Q(recipient=obj)
+        ).order_by('-created_at')[:5]
+        return TransactionDetailSerializer(recent, many=True).data
+    
+    def get_recent_transfer_attempts(self, obj):
+        recent = obj.transfer_attempts.order_by('-created_at')[:5]
+        return TransferAttemptSerializer(recent, many=True).data
+    
+    def get_linked_providers(self, obj):
+        return LinkedProviderSerializer(obj.linked_providers.all(), many=True).data
+
+
+class AdminUserUpdateSerializer(serializers.Serializer):
+    """
+    Serializer for admin user updates.
+    """
+    status = serializers.CharField(required=False)
+    wallet_status = serializers.CharField(required=False)
+    send_limit_per_tx = serializers.DecimalField(required=False, max_digits=20, decimal_places=2)
+    send_limit_daily = serializers.DecimalField(required=False, max_digits=20, decimal_places=2)
+    kyc_tier = serializers.CharField(required=False)
+    reason = serializers.CharField(required=True, max_length=500)
+
+
+class AdminTransactionListSerializer(serializers.ModelSerializer):
+    """
+    Serializer for admin transaction list.
+    """
+    sender_handle = serializers.CharField(source='sender.handle', read_only=True, allow_null=True)
+    recipient_handle = serializers.CharField(source='recipient.handle', read_only=True)
+    reversal_status = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Transaction
+        fields = [
+            'id', 'type', 'sender_handle', 'recipient_handle', 'amount', 'currency',
+            'status', 'reversal_status', 'created_at'
+        ]
+        read_only_fields = fields
+    
+    def get_reversal_status(self, obj):
+        if obj.type == TransactionType.REVERSAL:
+            return 'is_reversal'
+        return 'reversed' if obj.reversals.filter(status=TransactionStatus.COMPLETED).exists() else 'none'
+
+
+class AdminAuditLogSerializer(serializers.ModelSerializer):
+    """
+    Serializer for admin audit log.
+    """
+    user_handle = serializers.CharField(source='user.handle', read_only=True, allow_null=True)
+    user_email = serializers.CharField(source='user.email', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = AuditLog
+        fields = ['id', 'user_handle', 'user_email', 'action', 'metadata', 'created_at']
         read_only_fields = fields
