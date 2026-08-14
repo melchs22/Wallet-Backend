@@ -3,7 +3,7 @@ from django.contrib.auth import login
 from .models import (
     User, Wallet, LedgerEntry, KYCTier, UserStatus, LedgerDirection, AuditLog,
     Transaction, TransactionType, TransactionStatus, WalletStatus, Notification,
-    TransferAttempt, LinkedProvider, ExchangeRate
+    TransferAttempt, LinkedProvider, ExchangeRate, PaymentRequest, SplitRequest, SplitParticipant
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -70,6 +70,45 @@ class TransferResponseSerializer(serializers.Serializer):
     note = serializers.CharField(allow_blank=True)
     status = serializers.CharField()
     created_at = serializers.DateTimeField()
+
+
+class PaymentRequestCreateSerializer(serializers.Serializer):
+    payer_handle = serializers.CharField(max_length=50)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2)
+    currency = serializers.CharField(max_length=3)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('Amount must be greater than zero.')
+        return value
+
+
+class PaymentRequestSerializer(serializers.ModelSerializer):
+    requester_handle = serializers.CharField(source='requester.handle', read_only=True)
+    payer_handle = serializers.CharField(source='payer.handle', read_only=True)
+    resulting_transaction_id = serializers.UUIDField(source='resulting_transaction.id', read_only=True, allow_null=True)
+
+    class Meta:
+        model = PaymentRequest
+        fields = ['id', 'requester_handle', 'payer_handle', 'amount', 'currency', 'note', 'status', 'expires_at', 'resulting_transaction_id', 'created_at']
+
+
+class SplitCreateSerializer(serializers.Serializer):
+    total_amount = serializers.DecimalField(max_digits=20, decimal_places=2)
+    currency = serializers.CharField(max_length=3)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    participants = serializers.ListField(child=serializers.DictField(), min_length=1)
+
+
+class SplitSerializer(serializers.ModelSerializer):
+    creator_handle = serializers.CharField(source='creator.handle', read_only=True)
+    participants = serializers.SerializerMethodField()
+    class Meta:
+        model = SplitRequest
+        fields = ['id', 'creator_handle', 'total_amount', 'currency', 'note', 'created_at', 'participants']
+    def get_participants(self, obj):
+        return [{'handle': p.payment_request.payer.handle, 'amount_owed': str(p.amount_owed), 'payment_request': PaymentRequestSerializer(p.payment_request).data} for p in obj.participants.select_related('payment_request__payer')]
 
 
 class NotificationSerializer(serializers.ModelSerializer):

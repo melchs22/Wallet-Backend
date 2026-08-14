@@ -1,8 +1,14 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import transaction
+from django.utils import timezone
+from datetime import timedelta
 from decimal import Decimal
 import uuid
+
+
+def default_request_expiry():
+    return timezone.now() + timedelta(days=7)
 
 
 class CustomUserManager(BaseUserManager):
@@ -67,6 +73,14 @@ class TransactionStatus(models.TextChoices):
     COMPLETED = 'completed', 'Completed'
     FAILED = 'failed', 'Failed'
     REVERSED = 'reversed', 'Reversed'
+
+
+class PaymentRequestStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    PAID = 'paid', 'Paid'
+    DECLINED = 'declined', 'Declined'
+    CANCELLED = 'cancelled', 'Cancelled'
+    EXPIRED = 'expired', 'Expired'
 
 
 class LedgerDirection(models.TextChoices):
@@ -195,6 +209,55 @@ class Transaction(models.Model):
             models.Index(fields=['sender', 'created_at']),  # A6: Composite index for history
             models.Index(fields=['recipient', 'created_at']),  # A6: Composite index for history
         ]
+
+
+class PaymentRequest(models.Model):
+    requester = models.ForeignKey(User, on_delete=models.CASCADE, related_name='requests_sent')
+    payer = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='requests_received', null=True, blank=True
+    )
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    note = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=20, choices=PaymentRequestStatus.choices, default=PaymentRequestStatus.PENDING
+    )
+    expires_at = models.DateTimeField(default=default_request_expiry)
+    resulting_transaction = models.ForeignKey(
+        Transaction, on_delete=models.SET_NULL, null=True, blank=True, related_name='fulfilled_requests'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'payment_requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['requester', 'status', 'created_at']),
+            models.Index(fields=['payer', 'status', 'created_at']),
+        ]
+
+
+class SplitRequest(models.Model):
+    creator = models.ForeignKey(User, on_delete=models.CASCADE, related_name='splits_created')
+    total_amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'split_requests'
+        ordering = ['-created_at']
+
+
+class SplitParticipant(models.Model):
+    split_request = models.ForeignKey(SplitRequest, on_delete=models.CASCADE, related_name='participants')
+    payment_request = models.OneToOneField(
+        PaymentRequest, on_delete=models.CASCADE, related_name='split_participant'
+    )
+    amount_owed = models.DecimalField(max_digits=20, decimal_places=2)
+
+    class Meta:
+        db_table = 'split_participants'
 
 
 class LedgerEntry(models.Model):
