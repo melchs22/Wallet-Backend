@@ -2,7 +2,8 @@ from rest_framework import serializers
 from django.contrib.auth import login
 from .models import (
     User, Wallet, LedgerEntry, KYCTier, UserStatus, LedgerDirection, AuditLog,
-    Transaction, TransactionType, TransactionStatus, WalletStatus, Notification
+    Transaction, TransactionType, TransactionStatus, WalletStatus, Notification,
+    TransferAttempt, LinkedProvider, ExchangeRate
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -85,7 +86,9 @@ class TransactionSerializer(serializers.ModelSerializer):
     direction = serializers.SerializerMethodField()
 
     class Meta:
-        model = 'wallet.Transaction'
+        # DRF requires the model class here. A string passes import-time checks
+        # but fails when the transaction feed is serialized.
+        model = Transaction
         fields = [
             'id', 'type', 'counterparty_handle', 'counterparty_display_name',
             'counterparty_avatar_url', 'amount', 'currency', 'note', 'status',
@@ -251,7 +254,7 @@ class TransferAttemptSerializer(serializers.ModelSerializer):
     Serializer for transfer attempt logs.
     """
     class Meta:
-        model = 'wallet.TransferAttempt'
+        model = TransferAttempt
         fields = ['id', 'recipient_handle_input', 'amount', 'currency', 'rejection_reason', 'created_at']
         read_only_fields = fields
 
@@ -261,7 +264,7 @@ class LinkedProviderSerializer(serializers.ModelSerializer):
     Serializer for linked mobile money providers.
     """
     class Meta:
-        model = 'wallet.LinkedProvider'
+        model = LinkedProvider
         fields = ['id', 'provider', 'masked_reference', 'verification_status', 'created_at']
         read_only_fields = fields
 
@@ -271,6 +274,6 @@ class ExchangeRateSerializer(serializers.ModelSerializer):
     Serializer for exchange rates.
     """
     class Meta:
-        model = 'wallet.ExchangeRate'
+        model = ExchangeRate
         fields = ['id', 'from_currency', 'to_currency', 'rate', 'source', 'valid_from', 'valid_until']
         read_only_fields = fields
