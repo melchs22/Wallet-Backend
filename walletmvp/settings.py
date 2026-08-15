@@ -42,6 +42,7 @@ ALLOWED_HOSTS = [
     'www.wallet-backend-lqhq.onrender.com',
     'localhost',
     '127.0.0.1',
+    'testserver',
 ]
 
 # Database Configuration - SQLite for now

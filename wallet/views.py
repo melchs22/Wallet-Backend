@@ -317,6 +317,7 @@ class AdminLoginView(APIView):
     tags=['Authentication']
 )
 @api_view(['POST'])
+@csrf_exempt
 @permission_classes([AllowAny])
 def admin_auth_login(request):
     """Admin username/password login endpoint with staff checks and password-change gate."""
@@ -367,6 +368,7 @@ def admin_auth_login(request):
     tags=['Authentication']
 )
 @api_view(['POST'])
+@csrf_exempt
 @permission_classes([IsAuthenticated])
 def admin_auth_logout(request):
     logout(request)
@@ -379,6 +381,7 @@ def admin_auth_logout(request):
     tags=['Authentication']
 )
 @api_view(['POST'])
+@csrf_exempt
 @permission_classes([IsAuthenticated])
 def admin_change_password(request):
     serializer = AdminChangePasswordSerializer(data=request.data)
