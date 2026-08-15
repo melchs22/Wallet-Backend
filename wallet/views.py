@@ -1404,9 +1404,6 @@ def apply_admin_topup(admin_user, target_user, amount, currency='USD', note='', 
                 amount=Decimal('0.00')
             )
 
-        if admin_wallet.get_balance() < amount:
-            raise ValidationError('Admin wallet has insufficient funds to complete this top-up.')
-
         if target_wallet.status != WalletStatus.ACTIVE:
             raise ValidationError('Target wallet is not active and cannot receive a top-up.')
 
