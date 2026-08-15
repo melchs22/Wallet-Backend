@@ -21,7 +21,7 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
-    TransferAttempt, PaymentRequest
+    TransferAttempt, PaymentRequest, SplitRequest, SplitParticipant, SystemSetting
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
@@ -29,9 +29,9 @@ from .serializers import (
     NotificationSerializer, TransactionSerializer, WalletDetailSerializer,
     ProfileUpdateSerializer, generate_unique_handle, TransactionDetailSerializer,
     ReversalRequestSerializer, ReversalResponseSerializer, TransferAttemptSerializer,
-    AdminLoginSerializer, AdminDashboardSerializer, AdminUserListSerializer,
-    AdminUserDetailSerializer, AdminUserUpdateSerializer, AdminTransactionListSerializer,
-    AdminAuditLogSerializer
+    AdminLoginSerializer, AdminChangePasswordSerializer, AdminDashboardSerializer,
+    AdminUserListSerializer, AdminUserDetailSerializer, AdminUserUpdateSerializer,
+    AdminTransactionListSerializer, AdminAuditLogSerializer, SystemSettingSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -260,55 +260,153 @@ class AdminLoginView(APIView):
         username = serializer.validated_data['username']
         password = serializer.validated_data['password']
 
-        # Authenticate using either the stored username or the email address.
-        # Django's default ModelBackend uses the custom model's USERNAME_FIELD,
-        # which is set to email in User, so username-only admin accounts fail here.
         user = User.objects.filter(
             Q(username__iexact=username) | Q(email__iexact=username)
         ).first()
 
-        if not user or not user.check_password(password):
+        if not user:
             return Response(
                 {'error': 'Invalid credentials'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
 
-        # Check if user is staff
         if not user.is_staff:
             return Response(
                 {'error': 'Access denied. Admin privileges required.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
-        # Check if user account is active
+
+        if not user.check_password(password):
+            return Response(
+                {'error': 'Invalid credentials'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
         if user.status != UserStatus.ACTIVE:
             return Response(
                 {'error': 'Account is not active'},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Log the user in
         login(request, user)
-        
-        # Audit log for admin login
+
         AuditLog.objects.create(
             user=user,
             action='admin_login',
             metadata={'method': 'username_password'}
         )
-        
+
         wallet = user.wallet
-        
+
         response_data = {
             'user': UserSerializer(user).data,
             'wallet': WalletDetailSerializer(wallet).data,
             'access_token': issue_access_token(user),
+            'must_change_password': bool(user.must_change_password),
         }
-        
+
         response = Response(response_data, status=status.HTTP_200_OK)
         request.session.save()
-        
+
         return response
+
+
+@extend_schema(
+    request=AdminLoginSerializer,
+    responses={200: dict, 400: dict, 401: dict},
+    tags=['Authentication']
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def admin_auth_login(request):
+    """Admin username/password login endpoint with staff checks and password-change gate."""
+    serializer = AdminLoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    username = serializer.validated_data['username']
+    password = serializer.validated_data['password']
+
+    user = User.objects.filter(
+        Q(username__iexact=username) | Q(email__iexact=username)
+    ).first()
+
+    if not user:
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    if not user.is_staff:
+        return Response({'error': 'Access denied. Admin privileges required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if not user.check_password(password):
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    if user.status != UserStatus.ACTIVE:
+        return Response({'error': 'Account is not active'}, status=status.HTTP_403_FORBIDDEN)
+
+    login(request, user)
+    AuditLog.objects.create(user=user, action='admin_login', metadata={'method': 'username_password'})
+
+    wallet = getattr(user, 'wallet', None)
+    if wallet is None:
+        wallet = Wallet.objects.create(user=user, currency='USD', status=WalletStatus.ACTIVE)
+        LedgerEntry.objects.create(wallet=wallet, transaction=None, direction=LedgerDirection.CREDIT, amount=Decimal('0.00'))
+
+    response_data = {
+        'user': UserSerializer(user).data,
+        'wallet': WalletDetailSerializer(wallet).data,
+        'access_token': issue_access_token(user),
+        'must_change_password': bool(user.must_change_password),
+    }
+
+    request.session.save()
+    return Response(response_data, status=status.HTTP_200_OK)
+
+
+@extend_schema(
+    responses={200: dict},
+    tags=['Authentication']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def admin_auth_logout(request):
+    logout(request)
+    return Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(
+    request=AdminChangePasswordSerializer,
+    responses={200: dict, 400: dict},
+    tags=['Authentication']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def admin_change_password(request):
+    serializer = AdminChangePasswordSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    user = request.user
+    if not user.is_staff:
+        return Response({'error': 'Admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    current_password = serializer.validated_data['current_password']
+    new_password = serializer.validated_data['new_password']
+
+    if not user.check_password(current_password):
+        return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    user.set_password(new_password)
+    user.must_change_password = False
+    user.save(update_fields=['password', 'must_change_password'])
+
+    AuditLog.objects.create(
+        user=user,
+        action='admin_change_password',
+        metadata={'changed_by': str(user.id)}
+    )
+
+    logout(request)
+    return Response({'message': 'Password changed successfully. Please sign in again.'}, status=status.HTTP_200_OK)
 
 
 @extend_schema(
@@ -1157,6 +1255,76 @@ class ReversalView(APIView):
 # ============================================================================
 
 @extend_schema(
+    responses={200: dict},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_requests_list(request):
+    try:
+        status_filter = request.query_params.get('status', '').strip()
+        queryset = PaymentRequest.objects.select_related('requester', 'payer').order_by('-created_at')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        return Response(
+            [
+                {
+                    'id': pr.id,
+                    'requester_handle': pr.requester.handle,
+                    'payer_handle': pr.payer.handle if pr.payer else None,
+                    'amount': str(pr.amount),
+                    'currency': pr.currency,
+                    'status': pr.status,
+                    'note': pr.note,
+                    'created_at': pr.created_at.isoformat(),
+                }
+                for pr in queryset
+            ],
+            status=status.HTTP_200_OK,
+        )
+    except Exception as exc:
+        logger.exception('admin_requests_list_error')
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@extend_schema(
+    responses={200: dict},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_splits_list(request):
+    try:
+        status_filter = request.query_params.get('status', '').strip()
+        queryset = SplitRequest.objects.select_related('creator').prefetch_related('participants__payment_request__payer').order_by('-created_at')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        result = []
+        for split in queryset:
+            result.append({
+                'id': split.id,
+                'creator_handle': split.creator.handle,
+                'total_amount': str(split.total_amount),
+                'currency': split.currency,
+                'note': split.note,
+                'status': split.status,
+                'created_at': split.created_at.isoformat(),
+                'participants': [
+                    {
+                        'payment_request_id': participant.payment_request_id,
+                        'payer_handle': participant.payment_request.payer.handle if participant.payment_request.payer else None,
+                        'amount_owed': str(participant.amount_owed),
+                    }
+                    for participant in split.participants.all()
+                ],
+            })
+        return Response(result, status=status.HTTP_200_OK)
+    except Exception as exc:
+        logger.exception('admin_splits_list_error')
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@extend_schema(
     responses={200: AdminDashboardSerializer},
     tags=['Admin']
 )
@@ -1687,3 +1855,49 @@ def admin_audit_log(request):
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@extend_schema(
+    responses={200: dict},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_settings_list(request):
+    try:
+        settings = SystemSetting.objects.order_by('key')
+        serializer = SystemSettingSerializer(settings, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as exc:
+        logger.exception('admin_settings_list_error')
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@extend_schema(
+    request=SystemSettingSerializer,
+    responses={200: dict, 400: dict},
+    tags=['Admin']
+)
+@api_view(['PATCH'])
+@permission_classes([IsAdminUser])
+def admin_settings_update(request, key):
+    try:
+        setting = SystemSetting.objects.get(key=key)
+    except SystemSetting.DoesNotExist:
+        return Response({'error': 'Setting not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    value = request.data.get('value')
+    if value is None:
+        return Response({'error': 'Value is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    old_value = setting.value
+    setting.value = str(value)
+    setting.updated_by = request.user
+    setting.save(update_fields=['value', 'updated_by', 'updated_at'])
+
+    AuditLog.objects.create(
+        user=request.user,
+        action='admin_setting_update',
+        metadata={'key': key, 'old_value': old_value, 'new_value': setting.value, 'reason': request.data.get('reason', '')},
+    )
+    return Response({'key': setting.key, 'value': setting.value, 'description': setting.description, 'updated_at': setting.updated_at.isoformat()}, status=status.HTTP_200_OK)

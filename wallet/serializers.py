@@ -4,7 +4,7 @@ from django.db import models
 from .models import (
     User, Wallet, LedgerEntry, KYCTier, UserStatus, LedgerDirection, AuditLog,
     Transaction, TransactionType, TransactionStatus, WalletStatus, Notification,
-    TransferAttempt, LinkedProvider, ExchangeRate, PaymentRequest, SplitRequest, SplitParticipant
+    TransferAttempt, LinkedProvider, ExchangeRate, PaymentRequest, SplitRequest, SplitParticipant, SystemSetting
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -13,11 +13,12 @@ from decimal import Decimal
 
 class UserSerializer(serializers.ModelSerializer):
     is_staff = serializers.BooleanField(read_only=True)
-    
+    must_change_password = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = User
-        fields = ['id', 'email', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff']
-        read_only_fields = ['id', 'kyc_tier', 'status', 'is_staff']
+        fields = ['id', 'email', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff', 'must_change_password']
+        read_only_fields = ['id', 'kyc_tier', 'status', 'is_staff', 'must_change_password']
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -329,6 +330,25 @@ class AdminLoginSerializer(serializers.Serializer):
     password = serializers.CharField(required=True, write_only=True)
 
 
+class AdminChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(required=True, write_only=True)
+    new_password = serializers.CharField(required=True, write_only=True, min_length=8)
+
+
+class AdminBroadcastNotificationSerializer(serializers.Serializer):
+    target = serializers.ChoiceField(choices=['all', 'status:active', 'status:suspended', 'status:closed', 'user'])
+    user_id = serializers.IntegerField(required=False, allow_null=True)
+    type = serializers.CharField(required=True, max_length=100)
+    payload = serializers.JSONField(required=True)
+
+
+class SystemSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SystemSetting
+        fields = ['key', 'value', 'description', 'updated_at']
+        read_only_fields = ['key', 'updated_at']
+
+
 class AdminDashboardSerializer(serializers.Serializer):
     """
     Serializer for admin dashboard statistics.
@@ -348,14 +368,22 @@ class AdminDashboardSerializer(serializers.Serializer):
 class AdminUserListSerializer(serializers.ModelSerializer):
     """
     Serializer for admin user list.
+    Includes all user records, not only staff members, so admins can review
+    system and operational accounts alongside standard users.
     """
     balance = serializers.SerializerMethodField()
-    
+    wallet_status = serializers.CharField(source='wallet.status', read_only=True)
+    is_staff = serializers.BooleanField(read_only=True)
+    is_agent = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = User
-        fields = ['id', 'email', 'handle', 'display_name', 'status', 'kyc_tier', 'balance', 'created_at']
+        fields = [
+            'id', 'email', 'handle', 'display_name', 'status', 'wallet_status',
+            'kyc_tier', 'balance', 'is_staff', 'is_agent', 'created_at'
+        ]
         read_only_fields = fields
-    
+
     def get_balance(self, obj):
         return str(obj.wallet.get_balance()) if hasattr(obj, 'wallet') else '0.00'
 

@@ -88,6 +88,42 @@ class CSRFEndpointTest(APITestCase):
         self.assertIn('csrftoken', response.cookies)
 
 
+class AdminAuthTest(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_admin_user(
+            username='adminuser',
+            password='StrongPass123',
+            email='admin@example.com',
+            is_staff=True,
+        )
+        self.normal_user = User.objects.create_user(
+            email='user@example.com',
+            google_sub='google_sub_user',
+            handle='regularuser',
+            display_name='Regular User',
+            status=UserStatus.ACTIVE,
+        )
+
+    def test_admin_login_requires_staff(self):
+        response = self.client.post('/api/admin/auth/login', {
+            'username': self.normal_user.email,
+            'password': 'StrongPass123',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_admin_login_returns_force_password_change_flag(self):
+        self.admin.must_change_password = True
+        self.admin.save(update_fields=['must_change_password'])
+
+        response = self.client.post('/api/admin/auth/login', {
+            'username': 'adminuser',
+            'password': 'StrongPass123',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['must_change_password'])
+
+
 class SignupFlowTest(TransactionTestCase):
     def test_signup_creates_user_wallet_and_ledger_atomically(self):
         """Test that signup creates user, wallet, and zero-balance ledger entry together atomically"""

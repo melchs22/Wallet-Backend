@@ -70,6 +70,7 @@ class CustomUserManager(BaseUserManager):
             handle=username,  # Use username as handle for admin users
             display_name=username,
             google_sub=None,  # No Google OAuth for admin users
+            must_change_password=True,
             **extra_fields
         )
         
@@ -155,6 +156,7 @@ class User(AbstractUser):
     )
     handle_changed_at = models.DateTimeField(null=True, blank=True)
     is_agent = models.BooleanField(default=False)  # B8: Agent flag for future cash network
+    must_change_password = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     # For OAuth users, use email as USERNAME_FIELD
@@ -275,10 +277,17 @@ class PaymentRequest(models.Model):
 
 
 class SplitRequest(models.Model):
+    class SplitStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        CANCELLED = 'cancelled', 'Cancelled'
+        PAID = 'paid', 'Paid'
+
     creator = models.ForeignKey(User, on_delete=models.CASCADE, related_name='splits_created')
     total_amount = models.DecimalField(max_digits=20, decimal_places=2)
     currency = models.CharField(max_length=3)
     note = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=SplitStatus.choices, default=SplitStatus.PENDING)
+    cancellation_reason = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -343,6 +352,21 @@ class Notification(models.Model):
     class Meta:
         db_table = 'notifications'
         ordering = ['-created_at']
+
+
+class SystemSetting(models.Model):
+    key = models.CharField(max_length=100, unique=True)
+    value = models.TextField()
+    description = models.TextField(blank=True, default='')
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='updated_settings')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'system_settings'
+        ordering = ['key']
+
+    def __str__(self):
+        return self.key
 
 
 class ProcessedRequest(models.Model):

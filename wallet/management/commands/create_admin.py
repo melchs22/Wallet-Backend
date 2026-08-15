@@ -1,5 +1,7 @@
+import os
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.conf import settings
 from wallet.models import User, Wallet, KYCTier, UserStatus, WalletStatus, LedgerEntry, LedgerDirection
 from decimal import Decimal
 
@@ -11,14 +13,14 @@ class Command(BaseCommand):
         parser.add_argument(
             '--username',
             type=str,
-            default='TUTU',
-            help='Admin username (default: TUTU)'
+            default=os.getenv('DEFAULT_ADMIN_USERNAME', 'TUTU'),
+            help='Admin username (default from env DEFAULT_ADMIN_USERNAME or TUTU)'
         )
         parser.add_argument(
             '--password',
             type=str,
-            default='tutu2005',
-            help='Admin password (default: tutu2005)'
+            default=os.getenv('DEFAULT_ADMIN_PASSWORD', 'tutu2005'),
+            help='Admin password (default from env DEFAULT_ADMIN_PASSWORD or tutu2005)'
         )
         parser.add_argument(
             '--email',
@@ -34,7 +36,6 @@ class Command(BaseCommand):
 
         try:
             with transaction.atomic():
-                # Check if user already exists
                 if User.objects.filter(username=username).exists():
                     self.stdout.write(
                         self.style.WARNING(f'Admin user "{username}" already exists.')
@@ -47,28 +48,26 @@ class Command(BaseCommand):
                     )
                     return
 
-                # Create admin user
                 user = User.objects.create_admin_user(
                     username=username,
                     password=password,
                     email=email,
-                    kyc_tier=KYCTier.TIER_2,  # Give admin highest KYC tier
-                    status=UserStatus.ACTIVE
+                    kyc_tier=KYCTier.TIER_2,
+                    status=UserStatus.ACTIVE,
+                    must_change_password=True,
                 )
 
-                # Create wallet for admin
                 wallet = Wallet.objects.create(
                     user=user,
                     currency='USD',
-                    status=WalletStatus.ACTIVE
+                    status=WalletStatus.ACTIVE,
                 )
 
-                # Create zero-balance ledger entry
                 LedgerEntry.objects.create(
                     wallet=wallet,
                     transaction=None,
                     direction=LedgerDirection.CREDIT,
-                    amount=Decimal('0.00')
+                    amount=Decimal('0.00'),
                 )
 
                 self.stdout.write(
@@ -78,6 +77,7 @@ class Command(BaseCommand):
                         f'  Email: {email}\n'
                         f'  Password: {password}\n'
                         f'  is_staff: {user.is_staff}\n'
+                        f'  must_change_password: {user.must_change_password}\n'
                         f'  KYC Tier: {user.kyc_tier}'
                     )
                 )

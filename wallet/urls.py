@@ -4,14 +4,19 @@ from .views import (
     TransferView, NotificationListView, NotificationDetailView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView, AdminLoginView,
+    admin_auth_login, admin_auth_logout, admin_change_password,
     admin_dashboard, admin_users_list, admin_user_detail, admin_user_update,
-    admin_transactions_list, admin_transaction_detail, admin_transfer_attempts, admin_audit_log
+    admin_transactions_list, admin_transaction_detail, admin_transfer_attempts, admin_audit_log,
+    admin_requests_list, admin_splits_list, admin_settings_list, admin_settings_update
 )
 
 urlpatterns = [
     # Authentication
     path('auth/google', GoogleAuthView.as_view(), name='google_auth'),
     path('auth/admin', AdminLoginView.as_view(), name='admin_login'),
+    path('admin/auth/login', admin_auth_login, name='admin_auth_login'),
+    path('admin/auth/logout', admin_auth_logout, name='admin_auth_logout'),
+    path('admin/auth/change-password', admin_change_password, name='admin_change_password'),
     path('csrf', csrf_cookie_view, name='csrf_cookie'),
     path('auth/logout', logout_view, name='logout'),
     path('me', MeView.as_view(), name='me'),
@@ -47,6 +52,10 @@ urlpatterns = [
     path('admin/transactions', admin_transactions_list, name='admin_transactions_list'),
     path('admin/transactions/<str:transaction_id>', admin_transaction_detail, name='admin_transaction_detail'),
     path('admin/transactions/<str:transaction_id>/reverse', ReversalView.as_view(), name='admin_transaction_reverse'),
+    path('admin/requests', admin_requests_list, name='admin_requests_list'),
+    path('admin/splits', admin_splits_list, name='admin_splits_list'),
     path('admin/transfer-attempts', admin_transfer_attempts, name='admin_transfer_attempts'),
     path('admin/audit-log', admin_audit_log, name='admin_audit_log'),
+    path('admin/settings', admin_settings_list, name='admin_settings_list'),
+    path('admin/settings/<str:key>', admin_settings_update, name='admin_settings_update'),
 ]
