@@ -64,13 +64,14 @@ class CustomUserManager(BaseUserManager):
         extra_fields.setdefault('is_superuser', False)  # Not necessarily superuser
         extra_fields.setdefault('is_active', True)
         
+        extra_fields.setdefault('must_change_password', True)
+
         user = self.model(
             email=email,
             username=username,
             handle=username,  # Use username as handle for admin users
             display_name=username,
             google_sub=None,  # No Google OAuth for admin users
-            must_change_password=True,
             **extra_fields
         )
         
