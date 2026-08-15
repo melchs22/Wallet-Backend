@@ -438,6 +438,14 @@ class AdminUserUpdateSerializer(serializers.Serializer):
     reason = serializers.CharField(required=True, max_length=500)
 
 
+class AdminTopUpSerializer(serializers.Serializer):
+    """Serializer for admin wallet top-ups."""
+    amount = serializers.DecimalField(required=True, max_digits=20, decimal_places=2, min_value=Decimal('0.01'))
+    currency = serializers.CharField(required=False, max_length=3, default='USD')
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500, default='')
+    reason = serializers.CharField(required=True, max_length=500)
+
+
 class AdminTransactionListSerializer(serializers.ModelSerializer):
     """
     Serializer for admin transaction list.

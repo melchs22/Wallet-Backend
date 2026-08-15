@@ -6,8 +6,9 @@ from .views import (
     TransactionDetailView, ReversalView, AdminLoginView,
     admin_auth_login, admin_auth_logout, admin_change_password,
     admin_dashboard, admin_users_list, admin_user_detail, admin_user_update,
-    admin_transactions_list, admin_transaction_detail, admin_transfer_attempts, admin_audit_log,
-    admin_requests_list, admin_splits_list, admin_settings_list, admin_settings_update
+    admin_topup_user, admin_transactions_list, admin_transaction_detail,
+    admin_transfer_attempts, admin_audit_log, admin_requests_list, admin_splits_list,
+    admin_settings_list, admin_settings_update
 )
 
 urlpatterns = [
@@ -49,6 +50,7 @@ urlpatterns = [
     path('admin/users', admin_users_list, name='admin_users_list'),
     path('admin/users/<int:user_id>', admin_user_detail, name='admin_user_detail'),
     path('admin/users/<int:user_id>/update', admin_user_update, name='admin_user_update'),
+    path('admin/users/<int:user_id>/topup', admin_topup_user, name='admin_user_topup'),
     path('admin/transactions', admin_transactions_list, name='admin_transactions_list'),
     path('admin/transactions/<str:transaction_id>', admin_transaction_detail, name='admin_transaction_detail'),
     path('admin/transactions/<str:transaction_id>/reverse', ReversalView.as_view(), name='admin_transaction_reverse'),

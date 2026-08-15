@@ -31,7 +31,8 @@ from .serializers import (
     ReversalRequestSerializer, ReversalResponseSerializer, TransferAttemptSerializer,
     AdminLoginSerializer, AdminChangePasswordSerializer, AdminDashboardSerializer,
     AdminUserListSerializer, AdminUserDetailSerializer, AdminUserUpdateSerializer,
-    AdminTransactionListSerializer, AdminAuditLogSerializer, SystemSettingSerializer
+    AdminTopUpSerializer, AdminTransactionListSerializer, AdminAuditLogSerializer,
+    SystemSettingSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -39,6 +40,7 @@ from datetime import timedelta
 import uuid
 from django.db import models
 from django.db.models import Sum, Q
+from django.core.exceptions import ValidationError
 from .authentication import issue_access_token
 
 # Configure structured JSON logging
@@ -1370,6 +1372,95 @@ def ensure_default_system_settings():
     return SystemSetting.objects.order_by('key')
 
 
+def apply_admin_topup(admin_user, target_user, amount, currency='USD', note='', reason=''):
+    """Create a ledger-safe top-up as admin -> target with both sides mirrored in ledger entries."""
+    if amount <= 0:
+        raise ValidationError('Top-up amount must be greater than zero.')
+
+    if target_user.is_staff:
+        raise ValidationError('Admin top-ups are only supported for operational users.')
+
+    with transaction.atomic():
+        admin = User.objects.select_for_update().get(pk=admin_user.pk)
+        target = User.objects.select_for_update().get(pk=target_user.pk)
+
+        admin_wallet = getattr(admin, 'wallet', None)
+        if admin_wallet is None:
+            admin_wallet = Wallet.objects.create(user=admin, currency=currency, status=WalletStatus.ACTIVE)
+            LedgerEntry.objects.create(
+                wallet=admin_wallet,
+                transaction=None,
+                direction=LedgerDirection.CREDIT,
+                amount=Decimal('0.00')
+            )
+
+        target_wallet = getattr(target, 'wallet', None)
+        if target_wallet is None:
+            target_wallet = Wallet.objects.create(user=target, currency=currency, status=WalletStatus.ACTIVE)
+            LedgerEntry.objects.create(
+                wallet=target_wallet,
+                transaction=None,
+                direction=LedgerDirection.CREDIT,
+                amount=Decimal('0.00')
+            )
+
+        if admin_wallet.get_balance() < amount:
+            raise ValidationError('Admin wallet has insufficient funds to complete this top-up.')
+
+        if target_wallet.status != WalletStatus.ACTIVE:
+            raise ValidationError('Target wallet is not active and cannot receive a top-up.')
+
+        transaction_obj = Transaction.objects.create(
+            type=TransactionType.TOPUP,
+            sender=admin,
+            recipient=target,
+            amount=amount,
+            currency=currency,
+            note=note or 'Admin-initiated wallet top-up',
+            status=TransactionStatus.COMPLETED,
+        )
+
+        LedgerEntry.objects.create(
+            wallet=admin_wallet,
+            transaction=transaction_obj,
+            direction=LedgerDirection.DEBIT,
+            amount=amount,
+        )
+
+        LedgerEntry.objects.create(
+            wallet=target_wallet,
+            transaction=transaction_obj,
+            direction=LedgerDirection.CREDIT,
+            amount=amount,
+        )
+
+        AuditLog.objects.create(
+            user=admin,
+            action='admin_topup',
+            metadata={
+                'target_user_id': str(target.id),
+                'target_user_handle': target.handle,
+                'amount': str(amount),
+                'currency': currency,
+                'reason': reason,
+            }
+        )
+
+        create_notification(
+            target,
+            'wallet_topup',
+            {
+                'admin_handle': admin.handle,
+                'amount': str(amount),
+                'currency': currency,
+                'note': note or 'Admin-initiated wallet top-up',
+                'transaction_id': str(transaction_obj.id),
+            },
+        )
+
+        return transaction_obj
+
+
 @extend_schema(
     responses={200: AdminDashboardSerializer},
     tags=['Admin']
@@ -1557,6 +1648,62 @@ def admin_user_detail(request, user_id):
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@extend_schema(
+    request=AdminTopUpSerializer,
+    responses={200: AdminUserDetailSerializer, 400: dict},
+    tags=['Admin']
+)
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_topup_user(request, user_id):
+    """Top up a non-admin user wallet using a balanced debit/credit ledger entry."""
+    serializer = AdminTopUpSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    amount = serializer.validated_data['amount']
+    currency = serializer.validated_data.get('currency', 'USD')
+    note = serializer.validated_data.get('note', '')
+    reason = serializer.validated_data.get('reason', '').strip()
+
+    if not reason:
+        return Response(
+            {'error': 'Reason is required for all admin actions'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        target_user = User.objects.select_related('wallet').filter(is_staff=False).get(id=user_id)
+        transaction_obj = apply_admin_topup(
+            request.user,
+            target_user,
+            amount,
+            currency=currency,
+            note=note,
+            reason=reason,
+        )
+
+        serializer_out = AdminUserDetailSerializer(target_user)
+        return Response(serializer_out.data, status=status.HTTP_200_OK)
+
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+    except ValidationError as exc:
+        message = exc.message if hasattr(exc, 'message') else str(exc)
+        return Response({'code': 'validation_error', 'message': message}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as exc:
+        logger.error(
+            json.dumps({
+                'event': 'admin_topup_error',
+                'admin_user_id': str(request.user.id),
+                'target_user_id': user_id,
+                'error': str(exc),
+                'timestamp': timezone.now().isoformat(),
+            })
+        )
+        return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @extend_schema(
