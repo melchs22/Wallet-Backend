@@ -21,7 +21,7 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
-    TransferAttempt, PaymentRequest, SplitRequest, SplitParticipant, SystemSetting
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
@@ -1327,6 +1327,49 @@ def admin_splits_list(request):
         return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def ensure_default_system_settings():
+    """Seed a small, usable settings catalog so the admin UI is never blank."""
+    defaults = [
+        {
+            'key': 'default_currency',
+            'value': 'USD',
+            'description': 'Default fiat currency for new wallet accounts.'
+        },
+        {
+            'key': 'max_daily_transfer_limit',
+            'value': '5000.00',
+            'description': 'Default max daily transfer threshold for a user.'
+        },
+        {
+            'key': 'max_single_transfer_limit',
+            'value': '1000.00',
+            'description': 'Default single-transfer limit.'
+        },
+        {
+            'key': 'kyc_required_for_large_transfers',
+            'value': 'true',
+            'description': 'Require KYC verification before large transfers are allowed.'
+        },
+        {
+            'key': 'fraud_review_email',
+            'value': 'security@kesho.app',
+            'description': 'Primary email for review escalations and alerts.'
+        },
+    ]
+
+    for item in defaults:
+        SystemSetting.objects.get_or_create(
+            key=item['key'],
+            defaults={
+                'value': item['value'],
+                'description': item['description'],
+                'updated_by': None,
+            }
+        )
+
+    return SystemSetting.objects.order_by('key')
+
+
 @extend_schema(
     responses={200: AdminDashboardSerializer},
     tags=['Admin']
@@ -1338,43 +1381,50 @@ def admin_dashboard(request):
     Admin dashboard with aggregate statistics.
     """
     try:
+        regular_users = User.objects.filter(is_staff=False)
+
         # User counts by status
-        total_users = User.objects.count()
-        active_users = User.objects.filter(status=UserStatus.ACTIVE).count()
-        suspended_users = User.objects.filter(status=UserStatus.SUSPENDED).count()
-        closed_users = User.objects.filter(status=UserStatus.CLOSED).count()
-        
+        total_users = regular_users.count()
+        active_users = regular_users.filter(status=UserStatus.ACTIVE).count()
+        suspended_users = regular_users.filter(status=UserStatus.SUSPENDED).count()
+        closed_users = regular_users.filter(status=UserStatus.CLOSED).count()
+
         # Wallet counts
-        total_wallets = Wallet.objects.count()
-        frozen_wallets = Wallet.objects.filter(status=WalletStatus.FROZEN).count()
-        
+        total_wallets = Wallet.objects.filter(user__is_staff=False).count()
+        frozen_wallets = Wallet.objects.filter(user__is_staff=False, status=WalletStatus.FROZEN).count()
+
         # P2P volume
         today = timezone.now().date()
         week_ago = today - timedelta(days=7)
-        
+
         p2p_volume_today = Transaction.objects.filter(
             type=TransactionType.P2P_TRANSFER,
             status=TransactionStatus.COMPLETED,
-            created_at__date=today
+            created_at__date=today,
+            sender__is_staff=False,
+            recipient__is_staff=False,
         ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-        
+
         p2p_volume_week = Transaction.objects.filter(
             type=TransactionType.P2P_TRANSFER,
             status=TransactionStatus.COMPLETED,
-            created_at__date__gte=week_ago
+            created_at__date__gte=week_ago,
+            sender__is_staff=False,
+            recipient__is_staff=False,
         ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-        
+
         # Pending payment requests
         pending_payment_requests = PaymentRequest.objects.filter(
-            status=PaymentRequestStatus.PENDING
+            requester__is_staff=False,
+            status=PaymentRequestStatus.PENDING,
         ).count()
-        
+
         # Transfer attempt rejections in last 24h
         twenty_four_hours_ago = timezone.now() - timedelta(hours=24)
         transfer_attempt_rejections_24h = TransferAttempt.objects.filter(
             created_at__gte=twenty_four_hours_ago
         ).count()
-        
+
         response_data = {
             'total_users': total_users,
             'active_users': active_users,
@@ -1387,9 +1437,9 @@ def admin_dashboard(request):
             'frozen_wallets': frozen_wallets,
             'transfer_attempt_rejections_24h': transfer_attempt_rejections_24h
         }
-        
+
         return Response(response_data, status=status.HTTP_200_OK)
-        
+
     except Exception as e:
         logger.error(
             json.dumps({
@@ -1419,28 +1469,28 @@ def admin_users_list(request):
         query = request.query_params.get('query', '').strip()
         status_filter = request.query_params.get('status', '').strip()
         cursor = request.query_params.get('cursor', '').strip()
-        
-        # Build queryset
-        users = User.objects.select_related('wallet').all()
-        
+
+        # Exclude internal staff accounts from the operational user list.
+        users = User.objects.select_related('wallet').filter(is_staff=False)
+
         # Apply search
         if query:
             users = users.filter(
-                Q(handle__icontains=query) | 
+                Q(handle__icontains=query) |
                 Q(email__icontains=query) |
                 Q(display_name__icontains=query)
             )
-        
+
         # Apply status filter
         if status_filter:
             users = users.filter(status=status_filter)
-        
+
         # Apply cursor pagination
         from rest_framework.pagination import CursorPagination
         paginator = CursorPagination()
         paginator.page_size = 50
         paginator.ordering = '-created_at'
-        
+
         if cursor:
             # For simplicity, we'll use offset-based pagination for this implementation
             # In production, you'd want proper cursor-based pagination
@@ -1449,10 +1499,10 @@ def admin_users_list(request):
                 users = users[cursor_offset:]
             except ValueError:
                 pass
-        
+
         paginated_users = paginator.paginate_queryset(users, request)
         serializer = AdminUserListSerializer(paginated_users, many=True)
-        
+
         return paginator.get_paginated_response(serializer.data)
         
     except Exception as e:
@@ -1483,8 +1533,8 @@ def admin_user_detail(request, user_id):
     try:
         user = User.objects.select_related('wallet').prefetch_related(
             'sent_transactions', 'received_transactions', 'transfer_attempts', 'linked_providers'
-        ).get(id=user_id)
-        
+        ).filter(is_staff=False).get(id=user_id)
+
         serializer = AdminUserDetailSerializer(user)
         return Response(serializer.data, status=status.HTTP_200_OK)
         
@@ -1869,6 +1919,8 @@ def admin_audit_log(request):
 def admin_settings_list(request):
     try:
         settings = SystemSetting.objects.order_by('key')
+        if not settings.exists():
+            settings = ensure_default_system_settings()
         serializer = SystemSettingSerializer(settings, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
     except Exception as exc:
