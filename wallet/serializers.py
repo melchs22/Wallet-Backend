@@ -98,7 +98,22 @@ class PaymentRequestSerializer(serializers.ModelSerializer):
         fields = ['id', 'requester_handle', 'payer_handle', 'amount', 'currency', 'note', 'status', 'expires_at', 'resulting_transaction_id', 'created_at']
 
 
+class PaymentRequestCreateSerializer(serializers.Serializer):
+    payer_handle = serializers.CharField(max_length=50)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=Decimal('0.01'))
+    currency = serializers.CharField(max_length=3, default='USD')
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
 class SplitCreateSerializer(serializers.Serializer):
+    total_amount = serializers.DecimalField(max_digits=20, decimal_places=2)
+    currency = serializers.CharField(max_length=3)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    participants = serializers.ListField(
+        child=serializers.DictField(child=serializers.CharField()),
+        min_length=1
+    )
+
     total_amount = serializers.DecimalField(max_digits=20, decimal_places=2)
     currency = serializers.CharField(max_length=3)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)

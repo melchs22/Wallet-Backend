@@ -32,7 +32,8 @@ from .serializers import (
     AdminLoginSerializer, AdminChangePasswordSerializer, AdminDashboardSerializer,
     AdminUserListSerializer, AdminUserDetailSerializer, AdminUserUpdateSerializer,
     AdminTopUpSerializer, AdminTransactionListSerializer, AdminAuditLogSerializer,
-    SystemSettingSerializer
+    SystemSettingSerializer, PaymentRequestCreateSerializer, PaymentRequestSerializer,
+    SplitCreateSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -2100,3 +2101,734 @@ def admin_settings_update(request, key):
         metadata={'key': key, 'old_value': old_value, 'new_value': setting.value, 'reason': request.data.get('reason', '')},
     )
     return Response({'key': setting.key, 'value': setting.value, 'description': setting.description, 'updated_at': setting.updated_at.isoformat()}, status=status.HTTP_200_OK)
+
+
+# ---- REQUEST MONEY (A1) ENDPOINTS ----
+
+@extend_schema(
+    request=PaymentRequestCreateSerializer,
+    responses={201: PaymentRequestSerializer, 400: dict},
+    tags=['Requests']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_payment_request(request):
+    """Create a payment request from requester to payer."""
+    serializer = PaymentRequestCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    requester = request.user
+    payer_handle = serializer.validated_data['payer_handle']
+    amount = serializer.validated_data['amount']
+    currency = serializer.validated_data['currency']
+    note = serializer.validated_data.get('note', '')
+    
+    try:
+        if amount.as_tuple().exponent < -2:
+            raise ValidationError('Amount cannot have more than 2 decimal places')
+        
+        if requester.handle == payer_handle:
+            return Response(
+                {'error': 'You cannot request money from yourself'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payer = User.objects.filter(handle=payer_handle, status=UserStatus.ACTIVE).first()
+        if not payer:
+            return Response(
+                {'error': 'Payer not found or inactive'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if not hasattr(payer, 'wallet') or payer.wallet.status != WalletStatus.ACTIVE:
+            return Response(
+                {'error': 'Payer wallet is not active'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payment_request = PaymentRequest.objects.create(
+            requester=requester,
+            payer=payer,
+            amount=amount,
+            currency=currency,
+            note=note,
+            status=PaymentRequestStatus.PENDING
+        )
+        
+        create_notification(
+            payer,
+            'payment_request_received',
+            {
+                'requester_handle': requester.handle,
+                'requester_display_name': requester.display_name,
+                'amount': str(amount),
+                'currency': currency,
+                'note': note,
+                'payment_request_id': payment_request.id
+            }
+        )
+        
+        return Response(
+            PaymentRequestSerializer(payment_request).data,
+            status=status.HTTP_201_CREATED
+        )
+    
+    except ValidationError as exc:
+        return Response(
+            {'error': str(exc.message) if hasattr(exc, 'message') else str(exc)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        logger.error(f'create_payment_request_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: PaymentRequestSerializer},
+    tags=['Requests']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_payment_requests(request):
+    """List payment requests for the authenticated user (sent or received)."""
+    try:
+        direction = request.query_params.get('direction', 'received').strip()
+        status_filter = request.query_params.get('status', '').strip()
+        cursor = request.query_params.get('cursor', '').strip()
+        
+        if direction == 'sent':
+            requests_qs = PaymentRequest.objects.filter(requester=request.user)
+        elif direction == 'received':
+            requests_qs = PaymentRequest.objects.filter(payer=request.user)
+        else:
+            return Response(
+                {'error': 'direction must be "sent" or "received"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if status_filter:
+            requests_qs = requests_qs.filter(status=status_filter)
+        
+        now = timezone.now()
+        requests_qs.filter(status=PaymentRequestStatus.PENDING, expires_at__lt=now).update(
+            status=PaymentRequestStatus.EXPIRED
+        )
+        
+        from rest_framework.pagination import CursorPagination
+        paginator = CursorPagination()
+        paginator.page_size = 20
+        paginator.ordering = '-created_at'
+        
+        paginated = paginator.paginate_queryset(requests_qs, request)
+        serializer = PaymentRequestSerializer(paginated, many=True)
+        return paginator.get_paginated_response(serializer.data)
+    
+    except Exception as e:
+        logger.error(f'get_payment_requests_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: PaymentRequestSerializer},
+    tags=['Requests']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_payment_request_detail(request, request_id):
+    """Get a single payment request."""
+    try:
+        payment_request = PaymentRequest.objects.get(id=request_id)
+        
+        if request.user != payment_request.requester and request.user != payment_request.payer:
+            return Response(
+                {'error': 'Access denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if payment_request.status == PaymentRequestStatus.PENDING and payment_request.expires_at < timezone.now():
+            payment_request.status = PaymentRequestStatus.EXPIRED
+            payment_request.save()
+        
+        return Response(
+            PaymentRequestSerializer(payment_request).data,
+            status=status.HTTP_200_OK
+        )
+    
+    except PaymentRequest.DoesNotExist:
+        return Response(
+            {'error': 'Request not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'get_payment_request_detail_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request=TransferRequestSerializer,
+    responses={200: PaymentRequestSerializer, 400: dict},
+    tags=['Requests']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def pay_payment_request(request, request_id):
+    """Pay a payment request (payer accepts)."""
+    try:
+        payment_request = PaymentRequest.objects.select_for_update().get(id=request_id)
+        
+        if request.user != payment_request.payer:
+            return Response(
+                {'error': 'Only the payer can pay this request'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if payment_request.status != PaymentRequestStatus.PENDING:
+            return Response(
+                {'error': f'Request status is {payment_request.status}, not pending'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if payment_request.expires_at < timezone.now():
+            payment_request.status = PaymentRequestStatus.EXPIRED
+            payment_request.save()
+            return Response(
+                {'error': 'This request has expired'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payer = request.user
+        requester = payment_request.requester
+        amount = payment_request.amount
+        currency = payment_request.currency
+        note = payment_request.note or 'Payment for request'
+        
+        idempotency_key = request.data.get('idempotency_key', '')
+        if not idempotency_key:
+            return Response(
+                {'error': 'idempotency_key is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if ProcessedRequest.objects.filter(idempotency_key=idempotency_key).exists():
+            existing = ProcessedRequest.objects.get(idempotency_key=idempotency_key)
+            if existing.transaction:
+                payment_request.refresh_from_db()
+                return Response(
+                    PaymentRequestSerializer(payment_request).data,
+                    status=status.HTTP_200_OK
+                )
+        
+        with transaction.atomic():
+            payer_wallet = payer.wallet
+            requester_wallet = requester.wallet
+            
+            if payer.status != UserStatus.ACTIVE:
+                return Response(
+                    {'code': 'payer_account_suspended', 'message': 'Payer account is suspended'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            if payer_wallet.status != WalletStatus.ACTIVE:
+                return Response(
+                    {'code': 'payer_wallet_frozen', 'message': 'Payer wallet is frozen'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            current_balance = payer_wallet.get_balance()
+            if current_balance < amount:
+                return Response(
+                    {'code': 'insufficient_funds', 'message': 'Insufficient funds'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if amount > payer.send_limit_per_tx:
+                return Response(
+                    {'code': 'per_transaction_limit_exceeded', 'message': 'Amount exceeds per-transaction limit'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            twenty_four_hours_ago = timezone.now() - timedelta(days=1)
+            sent_today = payer.sent_transactions.filter(
+                created_at__gte=twenty_four_hours_ago,
+                status=TransactionStatus.COMPLETED
+            ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            
+            if sent_today + amount > payer.send_limit_daily:
+                return Response(
+                    {'code': 'daily_limit_exceeded', 'message': 'Amount exceeds daily limit'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            transaction_obj = Transaction.objects.create(
+                type=TransactionType.P2P_TRANSFER,
+                sender=payer,
+                recipient=requester,
+                amount=amount,
+                currency=currency,
+                note=note,
+                status=TransactionStatus.COMPLETED
+            )
+            
+            LedgerEntry.objects.create(
+                wallet=payer_wallet,
+                transaction=transaction_obj,
+                direction=LedgerDirection.DEBIT,
+                amount=amount
+            )
+            
+            LedgerEntry.objects.create(
+                wallet=requester_wallet,
+                transaction=transaction_obj,
+                direction=LedgerDirection.CREDIT,
+                amount=amount
+            )
+            
+            ProcessedRequest.objects.create(
+                idempotency_key=idempotency_key,
+                user=payer,
+                transaction=transaction_obj
+            )
+            
+            payment_request.status = PaymentRequestStatus.PAID
+            payment_request.resulting_transaction = transaction_obj
+            payment_request.save()
+            
+            AuditLog.objects.create(
+                user=payer,
+                action='payment_request_paid',
+                metadata={
+                    'payment_request_id': payment_request.id,
+                    'transaction_id': str(transaction_obj.id),
+                    'requester_handle': requester.handle,
+                    'amount': str(amount)
+                }
+            )
+        
+        create_notification(
+            requester,
+            'payment_request_paid',
+            {
+                'payer_handle': payer.handle,
+                'payer_display_name': payer.display_name,
+                'amount': str(amount),
+                'currency': currency,
+                'payment_request_id': payment_request.id,
+                'transaction_id': str(transaction_obj.id)
+            }
+        )
+        
+        return Response(
+            PaymentRequestSerializer(payment_request).data,
+            status=status.HTTP_200_OK
+        )
+    
+    except PaymentRequest.DoesNotExist:
+        return Response(
+            {'error': 'Request not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'pay_payment_request_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: PaymentRequestSerializer},
+    tags=['Requests']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def decline_payment_request(request, request_id):
+    """Decline a payment request."""
+    try:
+        payment_request = PaymentRequest.objects.get(id=request_id)
+        
+        if request.user != payment_request.payer:
+            return Response(
+                {'error': 'Only the payer can decline this request'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if payment_request.status != PaymentRequestStatus.PENDING:
+            return Response(
+                {'error': f'Request status is {payment_request.status}, not pending'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payment_request.status = PaymentRequestStatus.DECLINED
+        payment_request.save()
+        
+        create_notification(
+            payment_request.requester,
+            'payment_request_declined',
+            {
+                'payer_handle': request.user.handle,
+                'payer_display_name': request.user.display_name,
+                'amount': str(payment_request.amount),
+                'currency': payment_request.currency,
+                'payment_request_id': payment_request.id
+            }
+        )
+        
+        AuditLog.objects.create(
+            user=request.user,
+            action='payment_request_declined',
+            metadata={'payment_request_id': payment_request.id}
+        )
+        
+        return Response(
+            PaymentRequestSerializer(payment_request).data,
+            status=status.HTTP_200_OK
+        )
+    
+    except PaymentRequest.DoesNotExist:
+        return Response(
+            {'error': 'Request not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'decline_payment_request_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: PaymentRequestSerializer},
+    tags=['Requests']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_payment_request(request, request_id):
+    """Cancel a payment request (requester only)."""
+    try:
+        payment_request = PaymentRequest.objects.get(id=request_id)
+        
+        if request.user != payment_request.requester:
+            return Response(
+                {'error': 'Only the requester can cancel this request'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if payment_request.status != PaymentRequestStatus.PENDING:
+            return Response(
+                {'error': f'Request status is {payment_request.status}, not pending'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payment_request.status = PaymentRequestStatus.CANCELLED
+        payment_request.save()
+        
+        AuditLog.objects.create(
+            user=request.user,
+            action='payment_request_cancelled',
+            metadata={'payment_request_id': payment_request.id}
+        )
+        
+        return Response(
+            PaymentRequestSerializer(payment_request).data,
+            status=status.HTTP_200_OK
+        )
+    
+    except PaymentRequest.DoesNotExist:
+        return Response(
+            {'error': 'Request not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'cancel_payment_request_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+# ---- QR CODE PAYMENTS (A2) ----
+
+import hmac
+import hashlib
+import base64
+from django.conf import settings
+
+def get_qr_signing_secret():
+    """Get the QR signing secret from environment or settings."""
+    return getattr(settings, 'QR_SIGNING_SECRET', 'dev-secret-key')
+
+@extend_schema(
+    responses={200: dict},
+    tags=['QR']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_qr_payload(request):
+    """Generate a signed QR payload for the current user."""
+    try:
+        amount = request.query_params.get('amount', '').strip()
+        note = request.query_params.get('note', '').strip()
+        
+        user = request.user
+        exp = int((timezone.now() + timedelta(hours=24)).timestamp())
+        
+        payload = {
+            'type': 'pay',
+            'handle': user.handle,
+            'exp': exp
+        }
+        if amount:
+            payload['amount'] = amount
+        if note:
+            payload['note'] = note
+        
+        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        secret = get_qr_signing_secret()
+        signature = hmac.new(
+            secret.encode(),
+            payload_json.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return Response(
+            {
+                'payload': payload_json,
+                'signature': signature,
+                'encoded': base64.b64encode((payload_json + '|' + signature).encode()).decode()
+            },
+            status=status.HTTP_200_OK
+        )
+    
+    except Exception as e:
+        logger.error(f'get_qr_payload_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+def verify_qr_signature(payload_json, signature):
+    """Verify a QR payload's HMAC signature."""
+    secret = get_qr_signing_secret()
+    expected_sig = hmac.new(
+        secret.encode(),
+        payload_json.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected_sig, signature)
+
+
+# ---- BILL SPLITTING (A3) ----
+
+@extend_schema(
+    request=SplitCreateSerializer,
+    responses={201: dict, 400: dict},
+    tags=['Splits']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_split(request):
+    """Create a bill split with multiple participants."""
+    try:
+        data = request.data
+        creator = request.user
+        total_amount = Decimal(str(data.get('total_amount', '0')))
+        currency = data.get('currency', 'USD')
+        note = data.get('note', '')
+        participants_data = data.get('participants', [])
+        
+        if total_amount <= 0:
+            return Response(
+                {'error': 'Total amount must be greater than zero'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        participants_list = []
+        total_assigned = Decimal('0.00')
+        
+        for p in participants_data:
+            handle = str(p.get('handle', '')).strip()
+            amount_str = str(p.get('amount', '')).strip()
+            
+            if not handle or not amount_str:
+                return Response(
+                    {'error': 'Each participant must have a handle and amount'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                amount = Decimal(amount_str)
+            except:
+                return Response(
+                    {'error': f'Invalid amount for {handle}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if amount <= 0:
+                return Response(
+                    {'error': f'Amount for {handle} must be greater than zero'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            total_assigned += amount
+            participants_list.append({'handle': handle, 'amount': amount})
+        
+        if total_assigned != total_amount:
+            return Response(
+                {'error': f'Participant amounts sum to {total_assigned}, not {total_amount}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        with transaction.atomic():
+            split = SplitRequest.objects.create(
+                creator=creator,
+                total_amount=total_amount,
+                currency=currency,
+                note=note,
+                status='pending'
+            )
+            
+            for p in participants_list:
+                payer_handle = p['handle']
+                amount_owed = p['amount']
+                
+                payer = User.objects.filter(handle=payer_handle, status=UserStatus.ACTIVE).first()
+                if not payer:
+                    raise ValidationError(f'Payer {payer_handle} not found or inactive')
+                
+                payment_request = PaymentRequest.objects.create(
+                    requester=creator,
+                    payer=payer,
+                    amount=amount_owed,
+                    currency=currency,
+                    note=f'Split payment: {note}' if note else 'Split payment',
+                    status=PaymentRequestStatus.PENDING
+                )
+                
+                SplitParticipant.objects.create(
+                    split_request=split,
+                    payment_request=payment_request,
+                    amount_owed=amount_owed
+                )
+                
+                create_notification(
+                    payer,
+                    'split_request_received',
+                    {
+                        'creator_handle': creator.handle,
+                        'creator_display_name': creator.display_name,
+                        'amount': str(amount_owed),
+                        'currency': currency,
+                        'total_split_amount': str(total_amount),
+                        'split_id': split.id,
+                        'payment_request_id': payment_request.id
+                    }
+                )
+        
+        return Response(
+            {
+                'id': split.id,
+                'creator_handle': creator.handle,
+                'total_amount': str(total_amount),
+                'currency': currency,
+                'note': note,
+                'status': split.status,
+                'created_at': split.created_at.isoformat(),
+                'participants': [
+                    {
+                        'handle': p['handle'],
+                        'amount': str(p['amount']),
+                        'status': 'pending'
+                    }
+                    for p in participants_list
+                ]
+            },
+            status=status.HTTP_201_CREATED
+        )
+    
+    except ValidationError as exc:
+        return Response(
+            {'error': str(exc.message) if hasattr(exc, 'message') else str(exc)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        logger.error(f'create_split_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: dict},
+    tags=['Splits']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_split_detail(request, split_id):
+    """Get split detail with participant statuses."""
+    try:
+        split = SplitRequest.objects.prefetch_related(
+            'participants__payment_request'
+        ).get(id=split_id)
+        
+        if request.user != split.creator and request.user not in [
+            p.payment_request.payer for p in split.participants.all()
+        ]:
+            return Response(
+                {'error': 'Access denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        participants = []
+        paid_count = 0
+        for participant in split.participants.all():
+            pr = participant.payment_request
+            if pr.status == PaymentRequestStatus.PAID:
+                paid_count += 1
+            
+            participants.append({
+                'handle': pr.payer.handle if pr.payer else '',
+                'amount': str(participant.amount_owed),
+                'status': pr.status,
+                'payment_request_id': pr.id
+            })
+        
+        return Response(
+            {
+                'id': split.id,
+                'creator_handle': split.creator.handle,
+                'total_amount': str(split.total_amount),
+                'currency': split.currency,
+                'note': split.note,
+                'status': split.status,
+                'created_at': split.created_at.isoformat(),
+                'paid_count': paid_count,
+                'total_participants': len(participants),
+                'participants': participants
+            },
+            status=status.HTTP_200_OK
+        )
+    
+    except SplitRequest.DoesNotExist:
+        return Response(
+            {'error': 'Split not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'get_split_detail_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

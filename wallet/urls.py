@@ -8,7 +8,10 @@ from .views import (
     admin_dashboard, admin_users_list, admin_user_detail, admin_user_update,
     admin_topup_user, admin_transactions_list, admin_transaction_detail,
     admin_transfer_attempts, admin_audit_log, admin_requests_list, admin_splits_list,
-    admin_settings_list, admin_settings_update
+    admin_settings_list, admin_settings_update,
+    create_payment_request, get_payment_requests, get_payment_request_detail,
+    pay_payment_request, decline_payment_request, cancel_payment_request,
+    get_qr_payload, create_split, get_split_detail
 )
 
 urlpatterns = [
@@ -44,6 +47,21 @@ urlpatterns = [
     
     # Account management
     path('me/close', CloseAccountView.as_view(), name='close_account'),
+    
+    # Payment requests
+    path('requests', create_payment_request, name='create_payment_request'),
+    path('requests', get_payment_requests, name='get_payment_requests'),
+    path('requests/<int:request_id>', get_payment_request_detail, name='get_payment_request_detail'),
+    path('requests/<int:request_id>/pay', pay_payment_request, name='pay_payment_request'),
+    path('requests/<int:request_id>/decline', decline_payment_request, name='decline_payment_request'),
+    path('requests/<int:request_id>/cancel', cancel_payment_request, name='cancel_payment_request'),
+    
+    # QR Code
+    path('me/qr-payload', get_qr_payload, name='get_qr_payload'),
+    
+    # Bill Splits
+    path('splits', create_split, name='create_split'),
+    path('splits/<int:split_id>', get_split_detail, name='get_split_detail'),
     
     # Admin API endpoints
     path('admin/dashboard', admin_dashboard, name='admin_dashboard'),
