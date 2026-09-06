@@ -1,0 +1,68 @@
+name: Deploy wallet platform
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: wallet-production
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Backend validation
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/python manage.py check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Web validation
+        working-directory: dsd-wallet
+        run: |
+          npm ci
+          npm run build
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+      - name: Sync application source
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+        run: |
+          rsync -az --delete \
+            --exclude='.git' \
+            --exclude='.env' \
+            --exclude='db.sqlite3' \
+            --exclude='backups/' \
+            -e 'ssh -i ~/.ssh/deploy_key' ./ "$DEPLOY_USER@$DEPLOY_HOST:$APP_DIR/"
+      - name: Deploy backend and frontend
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+          FRONTEND_DIR: ${{ secrets.FRONTEND_DIR }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_DIR='$APP_DIR' FRONTEND_DIR='$FRONTEND_DIR' bash '$APP_DIR/server-deploy.sh'"

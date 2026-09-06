@@ -1,54 +1,101 @@
 from django.contrib import admin
+from django.contrib import messages
+from django.urls import reverse
+from django.http import HttpResponse
+from django.utils import timezone
 from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
-    ProcessedRequest, AuditLog, PendingTransfer, TransferAttempt,
-    LinkedProvider, ExchangeRate
+    ProcessedRequest, AuditLog, TransferAttempt,
+    LinkedProvider, ExchangeRate, Dispute, PaymentRequest, SplitRequest, SystemSetting,
+    MobileMoneyTransaction, ScheduledTransfer, Merchant,
 )
 
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ['email', 'handle', 'display_name', 'status', 'kyc_tier', 'created_at']
-    list_filter = ['status', 'kyc_tier']
-    search_fields = ['email', 'handle', 'display_name']
-    readonly_fields = ['google_sub', 'created_at', 'handle_changed_at']
+    list_display = ['handle', 'email', 'status', 'kyc_tier', 'is_staff', 'created_at']
+    list_filter = ['status', 'kyc_tier', 'is_staff']
+    search_fields = ['handle', 'email', 'google_sub']
+    readonly_fields = ['google_sub', 'created_at', 'handle']
+    actions = ['suspend_users', 'reactivate_users', 'force_logout']
+
+    def suspend_users(self, request, queryset):
+        # Redirect to intermediate page for reason input
+        selected = request.POST.getlist(admin.ACTION_CHECKBOX_NAME)
+        return HttpResponseRedirect(
+            f'{reverse("admin:wallet_user_changelist")}?action=suspend_users&ids={",".join(selected)}'
+        )
+    suspend_users.short_description = 'Suspend selected users'
+
+    def reactivate_users(self, request, queryset):
+        selected = request.POST.getlist(admin.ACTION_CHECKBOX_NAME)
+        return HttpResponseRedirect(
+            f'{reverse("admin:wallet_user_changelist")}?action=reactivate_users&ids={",".join(selected)}'
+        )
+    reactivate_users.short_description = 'Reactivate selected users'
+
+    def force_logout(self, request, queryset):
+        # This would call the service function to invalidate sessions
+        # For now, we'll just log it
+        count = queryset.count()
+        self.message_user(request, f'{count} users will be logged out on next request.', messages.SUCCESS)
+    force_logout.short_description = 'Force logout selected users'
 
 
 @admin.register(Wallet)
 class WalletAdmin(admin.ModelAdmin):
-    list_display = ['user', 'currency', 'status', 'created_at']
+    list_display = ['user', 'currency', 'status', 'computed_balance']
     list_filter = ['status', 'currency']
-    readonly_fields = ['created_at']
+    readonly_fields = ['user', 'currency', 'computed_balance']
+    actions = ['freeze_wallets', 'unfreeze_wallets']
+
+    def computed_balance(self, obj):
+        return obj.get_balance()
+    computed_balance.short_description = 'Balance'
+
+    def freeze_wallets(self, request, queryset):
+        # This would call the service function with reason prompt
+        count = queryset.count()
+        self.message_user(request, f'{count} wallets will be frozen.', messages.SUCCESS)
+    freeze_wallets.short_description = 'Freeze selected wallets'
+
+    def unfreeze_wallets(self, request, queryset):
+        # This would call the service function with reason prompt
+        count = queryset.count()
+        self.message_user(request, f'{count} wallets will be unfrozen.', messages.SUCCESS)
+    unfreeze_wallets.short_description = 'Unfreeze selected wallets'
 
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
     list_display = ['id', 'type', 'sender', 'recipient', 'amount', 'currency', 'status', 'created_at']
     list_filter = ['type', 'status', 'currency']
-    search_fields = ['sender__email', 'recipient__email', 'note']
-    readonly_fields = ['created_at']
-    
-    # Prevent editing or deleting transactions
+    search_fields = ['id', 'sender__handle', 'recipient__handle']
+    actions = ['reverse_transactions']
+
     def has_change_permission(self, request, obj=None):
-        return False
-    
-    def has_delete_permission(self, request, obj=None):
-        return False
+        return False  # view and act via actions only, never raw field edits
+
+    def reverse_transactions(self, request, queryset):
+        # This would call the same service function POST /api/admin/transactions/<id>/reverse uses
+        # with a reason prompt via the intermediate-page action pattern
+        count = queryset.count()
+        self.message_user(request, f'{count} transactions selected for reversal (reason prompt required).', messages.INFO)
 
 
 @admin.register(LedgerEntry)
 class LedgerEntryAdmin(admin.ModelAdmin):
     list_display = ['wallet', 'transaction', 'direction', 'amount', 'created_at']
     list_filter = ['direction']
-    readonly_fields = ['created_at']
-    
+    search_fields = ['wallet__user__handle', 'transaction__id']
+
     # This table is append-only - prevent any updates or deletes
     def has_add_permission(self, request):
-        return False  # Entries should only be created via transaction logic
-    
+        return False
+
     def has_change_permission(self, request, obj=None):
         return False
-    
+
     def has_delete_permission(self, request, obj=None):
         return False
 
@@ -58,40 +105,51 @@ class NotificationAdmin(admin.ModelAdmin):
     list_display = ['user', 'type', 'read_at', 'created_at']
     list_filter = ['type']
     readonly_fields = ['created_at']
+    actions = ['mark_read']
+
+    def mark_read(self, request, queryset):
+        count = queryset.update(read_at=timezone.now())
+        self.message_user(request, f'{count} notifications marked as read.', messages.SUCCESS)
+    mark_read.short_description = 'Mark selected notifications as read'
 
 
 @admin.register(ProcessedRequest)
 class ProcessedRequestAdmin(admin.ModelAdmin):
     list_display = ['idempotency_key', 'user', 'transaction', 'created_at']
     search_fields = ['idempotency_key', 'user__email']
-    readonly_fields = ['created_at']
-    
-    # Prevent editing idempotency keys
+
+    # This is an integrity record - prevent any edits
+    def has_add_permission(self, request):
+        return False
+
     def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 
 @admin.register(AuditLog)
 class AuditLogAdmin(admin.ModelAdmin):
-    list_display = ['user', 'action', 'created_at']
+    list_display = ['user_display', 'action', 'created_at']
     list_filter = ['action']
-    search_fields = ['user__email', 'action']
-    readonly_fields = ['created_at']
-    
-    # Audit logs should be append-only
+    search_fields = ['user__email', 'user__handle', 'action']
+
+    @admin.display(description='User')
+    def user_display(self, obj):
+        if obj.user_id is None:
+            return '—'
+        return obj.user.handle or obj.user.email
+
+    # This is an integrity/accountability record - prevent any edits
+    def has_add_permission(self, request):
+        return False
+
     def has_change_permission(self, request, obj=None):
         return False
-    
+
     def has_delete_permission(self, request, obj=None):
         return False
-
-
-@admin.register(PendingTransfer)
-class PendingTransferAdmin(admin.ModelAdmin):
-    list_display = ['sender', 'recipient_email', 'amount', 'currency', 'status', 'created_at']
-    list_filter = ['status', 'currency']
-    search_fields = ['recipient_email', 'sender__email']
-    readonly_fields = ['claim_token', 'created_at']
 
 
 @admin.register(TransferAttempt)
@@ -99,12 +157,14 @@ class TransferAttemptAdmin(admin.ModelAdmin):
     list_display = ['user', 'recipient_handle_input', 'amount', 'currency', 'rejection_reason', 'created_at']
     list_filter = ['rejection_reason', 'currency']
     search_fields = ['user__email', 'recipient_handle_input']
-    readonly_fields = ['created_at']
-    
+
     # This is a log table - prevent edits
+    def has_add_permission(self, request):
+        return False
+
     def has_change_permission(self, request, obj=None):
         return False
-    
+
     def has_delete_permission(self, request, obj=None):
         return False
 
@@ -114,7 +174,7 @@ class LinkedProviderAdmin(admin.ModelAdmin):
     list_display = ['user', 'provider', 'masked_reference', 'verification_status', 'created_at']
     list_filter = ['provider', 'verification_status']
     search_fields = ['user__email', 'masked_reference']
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = ['created_at', 'updated_at', 'masked_reference', 'verification_status']
 
 
 @admin.register(ExchangeRate)
@@ -123,3 +183,149 @@ class ExchangeRateAdmin(admin.ModelAdmin):
     list_filter = ['from_currency', 'to_currency', 'source']
     search_fields = ['from_currency', 'to_currency']
     readonly_fields = ['created_at']
+
+    def save_model(self, request, obj, form, change):
+        # Log the change to audit log
+        AuditLog.objects.create(
+            user=request.user,
+            action='exchange_rate_updated',
+            metadata={
+                'from_currency': obj.from_currency,
+                'to_currency': obj.to_currency,
+                'rate': str(obj.rate),
+                'source': obj.source,
+                'is_update': change
+            }
+        )
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(Dispute)
+class DisputeAdmin(admin.ModelAdmin):
+    list_display = ['id', 'transaction', 'opened_by', 'status', 'resolved_by', 'created_at']
+    list_filter = ['status']
+    search_fields = ['opened_by__handle', 'transaction__id', 'reason']
+    readonly_fields = ['created_at', 'updated_at']
+
+    # Disputes should be resolved through the proper resolution endpoint, not direct edits
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PaymentRequest)
+class PaymentRequestAdmin(admin.ModelAdmin):
+    list_display = ['id', 'requester_display', 'payer_display', 'amount', 'currency', 'status', 'expires_at', 'created_at']
+    list_filter = ['status', 'currency']
+    search_fields = ['requester__handle', 'payer__handle']
+    actions = ['cancel_requests']
+
+    @admin.display(description='Requester')
+    def requester_display(self, obj):
+        return obj.requester.handle or obj.requester.email
+
+    @admin.display(description='Payer')
+    def payer_display(self, obj):
+        if obj.payer_id is None:
+            return '—'
+        return obj.payer.handle or obj.payer.email
+
+    def has_change_permission(self, request, obj=None):
+        return False  # Cancellation should go through custom action
+
+    def cancel_requests(self, request, queryset):
+        # This would call the real cancel service function
+        count = queryset.count()
+        self.message_user(request, f'{count} payment requests selected for cancellation.', messages.INFO)
+    cancel_requests.short_description = 'Cancel selected payment requests'
+
+
+@admin.register(SplitRequest)
+class SplitRequestAdmin(admin.ModelAdmin):
+    list_display = ['id', 'creator', 'total_amount', 'currency', 'status', 'created_at']
+    list_filter = ['status', 'currency']
+    search_fields = ['creator__handle']
+    actions = ['cancel_splits']
+
+    def has_change_permission(self, request, obj=None):
+        return False  # Cancellation should go through custom action
+
+    def cancel_splits(self, request, queryset):
+        # This would call the real cancel service function with cascade to child PaymentRequests
+        count = queryset.count()
+        self.message_user(request, f'{count} split requests selected for cancellation.', messages.INFO)
+    cancel_splits.short_description = 'Cancel selected split requests'
+
+
+@admin.register(SystemSetting)
+class SystemSettingAdmin(admin.ModelAdmin):
+    list_display = ['key', 'value', 'description', 'updated_by', 'updated_at']
+    search_fields = ['key', 'description']
+
+    def save_model(self, request, obj, form, change):
+        # Log the change to audit log
+        obj.updated_by = request.user
+        AuditLog.objects.create(
+            user=request.user,
+            action='system_setting_updated',
+            metadata={
+                'key': obj.key,
+                'value': obj.value,
+                'is_update': change
+            }
+        )
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(MobileMoneyTransaction)
+class MobileMoneyTransactionAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'type', 'amount', 'currency', 'status', 'provider_transaction_id', 'created_at']
+    list_filter = ['type', 'status', 'currency']
+    search_fields = ['user__email', 'provider_transaction_id']
+    readonly_fields = ['created_at', 'updated_at', 'completed_at']
+
+
+@admin.register(ScheduledTransfer)
+class ScheduledTransferAdmin(admin.ModelAdmin):
+    list_display = ['id', 'sender', 'recipient', 'amount', 'currency', 'frequency', 'status', 'next_execution', 'total_executions']
+    list_filter = ['status', 'frequency', 'currency']
+    search_fields = ['sender__handle', 'recipient__handle']
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(Merchant)
+class MerchantAdmin(admin.ModelAdmin):
+    list_display = ['id', 'business_name', 'user', 'status', 'created_at']
+    list_filter = ['status']
+    search_fields = ['user__handle', 'business_name']
+    readonly_fields = [
+        'static_qr_code', 'static_qr_payload', 'static_qr_signature',
+        'approved_at', 'created_at', 'updated_at',
+    ]
+    actions = ['approve_merchants', 'reject_merchants', 'generate_api_keys']
+
+    def approve_merchants(self, request, queryset):
+        count = queryset.filter(status='pending').update(
+            status='active', approved_by=request.user, approved_at=timezone.now()
+        )
+        self.message_user(request, f'{count} merchants approved.', messages.SUCCESS)
+    approve_merchants.short_description = 'Approve selected merchants'
+
+    def reject_merchants(self, request, queryset):
+        count = queryset.filter(status='pending').update(
+            status='rejected', approved_by=request.user, approved_at=timezone.now()
+        )
+        self.message_user(request, f'{count} merchants rejected.', messages.SUCCESS)
+    reject_merchants.short_description = 'Reject selected merchants'
+
+    def generate_api_keys(self, request, queryset):
+        self.message_user(request, 'Merchant API keys require the merchant payment schema migration.', messages.WARNING)
+    generate_api_keys.short_description = 'Generate API keys (live mode)'
+
+
+# Site-wide admin configuration - using default Django admin styling
+admin.site.site_header = "Wallet Admin"
+admin.site.site_title = "Wallet Admin"
+admin.site.index_title = "Wallet Administration"

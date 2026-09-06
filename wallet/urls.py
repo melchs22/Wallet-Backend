@@ -1,6 +1,6 @@
-from django.urls import path
+from django.urls import path, include
 from .views import (
-    GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView,
+    EmailSignupView, EmailLoginView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView,
     TransferView, NotificationListView, NotificationDetailView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView, AdminLoginView,
@@ -9,14 +9,25 @@ from .views import (
     admin_topup_user, admin_transactions_list, admin_transaction_detail,
     admin_transfer_attempts, admin_audit_log, admin_requests_list, admin_splits_list,
     admin_settings_list, admin_settings_update,
+    admin_reconciliation_last_run, admin_reconciliation_run,
     create_payment_request, get_payment_requests, get_payment_request_detail,
     pay_payment_request, decline_payment_request, cancel_payment_request,
-    get_qr_payload, create_split, get_split_detail
+    get_qr_payload, verify_qr_payload, create_split, get_split_detail, cancel_split,
+    create_dispute, list_disputes, get_dispute_detail, resolve_dispute, admin_list_disputes,
+    pay_qr_payload, list_linked_providers, link_mobile_money_provider,
+    mobile_money_topup, mobile_money_withdrawal, mobile_money_webhook, list_mobile_money_transactions,
+    create_scheduled_transfer, list_scheduled_transfers, get_scheduled_transfer_detail,
+    pause_scheduled_transfer, resume_scheduled_transfer, cancel_scheduled_transfer,
+    create_merchant_account, get_merchant_account, generate_merchant_qr,
+    merchant_dashboard, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
+    admin_list_merchants, admin_approve_merchant
 )
 
 urlpatterns = [
     # Authentication
     path('auth/google', GoogleAuthView.as_view(), name='google_auth'),
+    path('auth/signup', EmailSignupView.as_view(), name='email_signup'),
+    path('auth/login', EmailLoginView.as_view(), name='email_login'),
     path('auth/admin', AdminLoginView.as_view(), name='admin_login'),
     path('admin/auth/login', admin_auth_login, name='admin_auth_login'),
     path('admin/auth/logout', admin_auth_logout, name='admin_auth_logout'),
@@ -49,7 +60,7 @@ urlpatterns = [
     path('me/close', CloseAccountView.as_view(), name='close_account'),
     
     # Payment requests
-    path('requests', create_payment_request, name='create_payment_request'),
+    path('requests/create', create_payment_request, name='create_payment_request'),
     path('requests', get_payment_requests, name='get_payment_requests'),
     path('requests/<int:request_id>', get_payment_request_detail, name='get_payment_request_detail'),
     path('requests/<int:request_id>/pay', pay_payment_request, name='pay_payment_request'),
@@ -58,10 +69,13 @@ urlpatterns = [
     
     # QR Code
     path('me/qr-payload', get_qr_payload, name='get_qr_payload'),
+    path('qr/verify', verify_qr_payload, name='verify_qr_payload'),
+    path('qr/pay', pay_qr_payload, name='pay_qr_payload'),
     
     # Bill Splits
     path('splits', create_split, name='create_split'),
     path('splits/<int:split_id>', get_split_detail, name='get_split_detail'),
+    path('splits/<int:split_id>/cancel', cancel_split, name='cancel_split'),
     
     # Admin API endpoints
     path('admin/dashboard', admin_dashboard, name='admin_dashboard'),
@@ -78,4 +92,40 @@ urlpatterns = [
     path('admin/audit-log', admin_audit_log, name='admin_audit_log'),
     path('admin/settings', admin_settings_list, name='admin_settings_list'),
     path('admin/settings/<str:key>', admin_settings_update, name='admin_settings_update'),
+    path('admin/reconciliation/last-run', admin_reconciliation_last_run, name='admin_reconciliation_last_run'),
+    path('admin/reconciliation/run', admin_reconciliation_run, name='admin_reconciliation_run'),
+    
+    # Disputes
+    path('disputes/create', create_dispute, name='create_dispute'),
+    path('disputes', list_disputes, name='list_disputes'),
+    path('disputes/<int:dispute_id>', get_dispute_detail, name='get_dispute_detail'),
+    path('disputes/<int:dispute_id>/resolve', resolve_dispute, name='resolve_dispute'),
+    path('admin/disputes', admin_list_disputes, name='admin_list_disputes'),
+    
+    # Mobile Money
+    path('mobile-money/topup', mobile_money_topup, name='mobile_money_topup'),
+    path('mobile-money/withdrawal', mobile_money_withdrawal, name='mobile_money_withdrawal'),
+    path('mobile-money/webhook', mobile_money_webhook, name='mobile_money_webhook'),
+    path('mobile-money/transactions', list_mobile_money_transactions, name='list_mobile_money_transactions'),
+    path('mobile-money/providers', list_linked_providers, name='list_linked_providers'),
+    path('mobile-money/providers/link', link_mobile_money_provider, name='link_mobile_money_provider'),
+    
+    # Scheduled Transfers
+    path('scheduled-transfers/create', create_scheduled_transfer, name='create_scheduled_transfer'),
+    path('scheduled-transfers', list_scheduled_transfers, name='list_scheduled_transfers'),
+    path('scheduled-transfers/<int:transfer_id>', get_scheduled_transfer_detail, name='get_scheduled_transfer_detail'),
+    path('scheduled-transfers/<int:transfer_id>/pause', pause_scheduled_transfer, name='pause_scheduled_transfer'),
+    path('scheduled-transfers/<int:transfer_id>/resume', resume_scheduled_transfer, name='resume_scheduled_transfer'),
+    path('scheduled-transfers/<int:transfer_id>/cancel', cancel_scheduled_transfer, name='cancel_scheduled_transfer'),
+    
+    # Merchant Accounts
+    path('merchants/create', create_merchant_account, name='create_merchant_account'),
+    path('merchants/me', get_merchant_account, name='get_merchant_account'),
+    path('merchants/me/qr', generate_merchant_qr, name='generate_merchant_qr'),
+    path('merchants/me/dashboard', merchant_dashboard, name='merchant_dashboard'),
+    path('merchants/me/kyc-documents', merchant_kyc_documents, name='merchant_kyc_documents'),
+    path('merchants/me/credentials', merchant_credentials, name='merchant_credentials'),
+    path('merchants/me/webhook', merchant_webhook_config, name='merchant_webhook_config'),
+    path('admin/merchants', admin_list_merchants, name='admin_list_merchants'),
+    path('admin/merchants/<int:merchant_id>/approve', admin_approve_merchant, name='admin_approve_merchant'),
 ]

@@ -88,6 +88,28 @@ class CSRFEndpointTest(APITestCase):
         self.assertIn('csrftoken', response.cookies)
 
 
+class EmailAuthFlowTest(APITestCase):
+    def test_signup_and_login_with_email_password(self):
+        signup_payload = {
+            'email': 'newuser@example.com',
+            'password': 'StrongPass123',
+            'display_name': 'New User',
+        }
+
+        signup_response = self.client.post('/api/auth/signup', signup_payload, format='json')
+        self.assertEqual(signup_response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(User.objects.filter(email='newuser@example.com').exists())
+        self.assertIn('access_token', signup_response.data)
+
+        login_response = self.client.post('/api/auth/login', {
+            'email': 'newuser@example.com',
+            'password': 'StrongPass123',
+        }, format='json')
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.assertIn('access_token', login_response.data)
+        self.assertEqual(login_response.data['user']['email'], 'newuser@example.com')
+
+
 class AdminAuthTest(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_admin_user(

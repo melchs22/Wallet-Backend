@@ -2,9 +2,11 @@ from rest_framework import serializers
 from django.contrib.auth import login
 from django.db import models
 from .models import (
-    User, Wallet, LedgerEntry, KYCTier, UserStatus, LedgerDirection, AuditLog,
-    Transaction, TransactionType, TransactionStatus, WalletStatus, Notification,
-    TransferAttempt, LinkedProvider, ExchangeRate, PaymentRequest, SplitRequest, SplitParticipant, SystemSetting
+    User, Wallet, Transaction, LedgerEntry, Notification,
+    ProcessedRequest, AuditLog, KYCTier, UserStatus,
+    TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant,
+    LinkedProvider, ExchangeRate, Dispute, DisputeStatus, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, SystemSetting, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -36,6 +38,17 @@ class WalletSerializer(serializers.ModelSerializer):
 class GoogleAuthRequestSerializer(serializers.Serializer):
     code = serializers.CharField(required=True)
     state = serializers.CharField(required=True)
+
+
+class EmailSignupSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    display_name = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+
+class EmailLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
 
 
 class GoogleAuthResponseSerializer(serializers.Serializer):
@@ -494,3 +507,146 @@ class AdminAuditLogSerializer(serializers.ModelSerializer):
         model = AuditLog
         fields = ['id', 'user_handle', 'user_email', 'action', 'metadata', 'created_at']
         read_only_fields = fields
+
+
+class DisputeCreateSerializer(serializers.Serializer):
+    """
+    Serializer for creating a dispute on a transaction.
+    """
+    transaction_id = serializers.UUIDField(required=True)
+    reason = serializers.CharField(required=True, max_length=1000)
+    evidence_notes = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+
+class DisputeSerializer(serializers.ModelSerializer):
+    """
+    Serializer for dispute details.
+    """
+    opened_by_handle = serializers.CharField(source='opened_by.handle', read_only=True)
+    opened_by_display_name = serializers.CharField(source='opened_by.display_name', read_only=True)
+    transaction_id = serializers.UUIDField(source='transaction.id', read_only=True)
+    resolved_by_handle = serializers.CharField(source='resolved_by.handle', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = Dispute
+        fields = [
+            'id', 'transaction_id', 'opened_by_handle', 'opened_by_display_name',
+            'reason', 'evidence_notes', 'status', 'resolved_by_handle',
+            'resolved_at', 'resolution_notes', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+
+class DisputeResolveSerializer(serializers.Serializer):
+    """
+    Serializer for admin dispute resolution.
+    """
+    resolution = serializers.ChoiceField(choices=['reverse', 'deny'], required=True)
+    resolution_notes = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+
+class MobileMoneyTransactionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for mobile money transactions.
+    """
+    class Meta:
+        model = MobileMoneyTransaction
+        fields = [
+            'id', 'user', 'wallet', 'linked_provider', 'type', 'amount', 'currency',
+            'status', 'provider_transaction_id', 'provider_reference', 'provider_response',
+            'failure_reason', 'created_at', 'updated_at', 'completed_at'
+        ]
+        read_only_fields = ['id', 'user', 'wallet', 'provider_response', 'created_at', 'updated_at', 'completed_at']
+
+
+class MobileMoneyTopupSerializer(serializers.Serializer):
+    """
+    Serializer for mobile money top-up requests.
+    """
+    linked_provider_id = serializers.IntegerField(required=True)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=True)
+    currency = serializers.CharField(max_length=3, required=True)
+
+
+class MobileMoneyWithdrawalSerializer(serializers.Serializer):
+    """
+    Serializer for mobile money withdrawal requests.
+    """
+    linked_provider_id = serializers.IntegerField(required=True)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=True)
+    currency = serializers.CharField(max_length=3, required=True)
+
+
+class ScheduledTransferSerializer(serializers.ModelSerializer):
+    """
+    Serializer for scheduled transfers.
+    """
+    recipient_handle = serializers.CharField(source='recipient.handle', read_only=True)
+
+    class Meta:
+        model = ScheduledTransfer
+        fields = [
+            'id', 'sender', 'recipient', 'recipient_handle', 'amount', 'currency',
+            'frequency', 'next_execution', 'last_execution', 'end_date',
+            'total_executions', 'max_executions', 'status', 'note',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'sender', 'recipient', 'last_execution', 'total_executions', 'created_at', 'updated_at']
+
+
+class ScheduledTransferCreateSerializer(serializers.Serializer):
+    """
+    Serializer for creating a scheduled transfer.
+    """
+    recipient_handle = serializers.CharField(required=True)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=True)
+    currency = serializers.CharField(max_length=3, required=True)
+    frequency = serializers.ChoiceField(choices=ScheduleFrequency.choices, required=True)
+    start_date = serializers.DateTimeField(required=True)
+    end_date = serializers.DateTimeField(required=False, allow_null=True)
+    max_executions = serializers.IntegerField(required=False, allow_null=True)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class MerchantSerializer(serializers.ModelSerializer):
+    """
+    Serializer for merchant accounts.
+    """
+    user_handle = serializers.CharField(source='user.handle', read_only=True)
+    wallet_currency = serializers.CharField(source='wallet.currency', read_only=True)
+
+    class Meta:
+        model = Merchant
+        fields = [
+            'id', 'user', 'user_handle', 'business_name',
+            'business_type', 'description', 'status',
+            'static_qr_code', 'static_qr_payload', 'static_qr_signature',
+            'wallet', 'wallet_currency', 'logo_url', 'contact_email', 'contact_phone',
+            'address', 'tax_id', 'approved_by', 'approved_at', 'rejection_reason',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'user', 'static_qr_code', 'static_qr_payload', 'static_qr_signature',
+                           'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at']
+
+
+class MerchantCreateSerializer(serializers.Serializer):
+    """
+    Serializer for creating a merchant account application.
+    """
+    business_name = serializers.CharField(required=True, max_length=200)
+    business_type = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    description = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    wallet_id = serializers.IntegerField(required=True)
+    logo_url = serializers.URLField(required=False, allow_blank=True)
+    contact_email = serializers.EmailField(required=False, allow_blank=True)
+    contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    address = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    tax_id = serializers.CharField(required=False, allow_blank=True, max_length=50)
+
+
+class MerchantApprovalSerializer(serializers.Serializer):
+    """
+    Serializer for admin merchant approval/rejection.
+    """
+    action = serializers.ChoiceField(choices=['approve', 'reject'], required=True)
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, max_length=500)

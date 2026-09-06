@@ -17,14 +17,19 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import logging
 import json
+import hmac
+import hashlib
+import base64
+from django.conf import settings
 from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
-    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, KYCDocument, Settlement
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
+    EmailSignupSerializer, EmailLoginSerializer,
     UserResolveSerializer, TransferRequestSerializer, TransferResponseSerializer,
     NotificationSerializer, TransactionSerializer, WalletDetailSerializer,
     ProfileUpdateSerializer, generate_unique_handle, TransactionDetailSerializer,
@@ -33,12 +38,16 @@ from .serializers import (
     AdminUserListSerializer, AdminUserDetailSerializer, AdminUserUpdateSerializer,
     AdminTopUpSerializer, AdminTransactionListSerializer, AdminAuditLogSerializer,
     SystemSettingSerializer, PaymentRequestCreateSerializer, PaymentRequestSerializer,
-    SplitCreateSerializer
+    SplitCreateSerializer, DisputeCreateSerializer, DisputeSerializer, DisputeResolveSerializer,
+    MobileMoneyTransactionSerializer, MobileMoneyTopupSerializer, MobileMoneyWithdrawalSerializer,
+    ScheduledTransferSerializer, ScheduledTransferCreateSerializer,
+    MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
 from datetime import timedelta
 import uuid
+import secrets
 from django.db import models
 from django.db.models import Sum, Q
 from django.core.exceptions import ValidationError
@@ -46,6 +55,131 @@ from .authentication import issue_access_token
 
 # Configure structured JSON logging
 logger = logging.getLogger(__name__)
+
+
+def get_qr_signing_secret():
+    """Get the secret key for QR code signing."""
+    return getattr(settings, 'QR_SIGNING_SECRET', 'default-qr-secret-change-in-production')
+
+
+def verify_qr_signature(payload_json, signature):
+    """Verify the HMAC signature of a QR payload."""
+    secret = get_qr_signing_secret()
+    expected_signature = hmac.new(
+        secret.encode(),
+        payload_json.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected_signature)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@extend_schema(
+    request=EmailSignupSerializer,
+    responses={201: dict, 400: dict, 409: dict},
+    tags=['Authentication']
+)
+class EmailSignupView(APIView):
+    permission_classes = [AllowAny]
+    serializer_class = EmailSignupSerializer
+
+    def post(self, request):
+        serializer = EmailSignupSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email'].strip().lower()
+        password = serializer.validated_data['password']
+        display_name = (serializer.validated_data.get('display_name') or email.split('@')[0]).strip()
+
+        if User.objects.filter(email__iexact=email).exists():
+            return Response({'error': 'An account with this email already exists.'}, status=status.HTTP_409_CONFLICT)
+
+        base_handle = slugify(display_name)[:30] or slugify(email.split('@')[0])[:30] or 'walletuser'
+        with transaction.atomic():
+            handle = generate_unique_handle(base_handle)
+            user = User.objects.create_user(
+                email=email,
+                password=password,
+                handle=handle,
+                display_name=display_name,
+                kyc_tier=KYCTier.TIER_0,
+                status=UserStatus.ACTIVE,
+            )
+            wallet = Wallet.objects.create(user=user, currency='USD')
+            LedgerEntry.objects.create(
+                wallet=wallet,
+                transaction=None,
+                direction=LedgerDirection.CREDIT,
+                amount=Decimal('0.00'),
+            )
+            AuditLog.objects.create(
+                user=user,
+                action='signup',
+                metadata={'method': 'email_password', 'handle': handle},
+            )
+
+        login(request, user)
+        response_data = {
+            'user': UserSerializer(user).data,
+            'wallet': WalletSerializer(user.wallet).data,
+            'access_token': issue_access_token(user),
+            'is_new_user': True,
+        }
+        request.session.save()
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@extend_schema(
+    request=EmailLoginSerializer,
+    responses={200: dict, 400: dict, 401: dict},
+    tags=['Authentication']
+)
+class EmailLoginView(APIView):
+    permission_classes = [AllowAny]
+    serializer_class = EmailLoginSerializer
+
+    def post(self, request):
+        serializer = EmailLoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        email = serializer.validated_data['email'].strip().lower()
+        password = serializer.validated_data['password']
+
+        user = authenticate(request, username=email, password=password)
+        if user is None:
+            return Response({'error': 'Invalid email or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if user.status != UserStatus.ACTIVE:
+            return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
+
+        login(request, user)
+        wallet = getattr(user, 'wallet', None)
+        if wallet is None:
+            wallet = Wallet.objects.create(user=user, currency='USD')
+            LedgerEntry.objects.create(
+                wallet=wallet,
+                transaction=None,
+                direction=LedgerDirection.CREDIT,
+                amount=Decimal('0.00'),
+            )
+
+        AuditLog.objects.create(
+            user=user,
+            action='login',
+            metadata={'method': 'email_password'},
+        )
+
+        response_data = {
+            'user': UserSerializer(user).data,
+            'wallet': WalletSerializer(wallet).data,
+            'access_token': issue_access_token(user),
+            'is_new_user': False,
+        }
+        request.session.save()
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -551,14 +685,21 @@ class UserResolveView(APIView):
 
 def create_notification(user, notification_type, payload):
     """
-    Create a notification for a user.
-    Structured as a separate function for easy conversion to async later.
+    Create a notification for a user synchronously, then queue delivery async.
     """
-    Notification.objects.create(
-        user=user,
-        type=notification_type,
-        payload=payload
-    )
+    from wallet.services.notifications import create_notification_record
+
+    notification = create_notification_record(user, notification_type, payload)
+
+    def dispatch_delivery():
+        try:
+            from wallet.tasks import send_notification_task
+            send_notification_task.delay(notification.id)
+        except Exception:
+            logger.exception('notification_delivery_dispatch_failed', extra={'notification_id': notification.id})
+
+    transaction.on_commit(dispatch_delivery)
+    return notification
 
 
 @extend_schema(
@@ -636,7 +777,7 @@ class TransferView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Check currency match
+        # Check currency match - reject if sender's wallet currency doesn't match requested currency
         if sender_wallet.currency != currency:
             TransferAttempt.objects.create(
                 user=sender,
@@ -646,7 +787,7 @@ class TransferView(APIView):
                 rejection_reason='currency_mismatch'
             )
             return Response(
-                {'code': 'currency_mismatch', 'message': 'Currency mismatch'},
+                {'code': 'currency_mismatch', 'message': f'Sender wallet currency is {sender_wallet.currency}, but requested {currency}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -757,6 +898,50 @@ class TransferView(APIView):
                         {'error': 'Recipient wallet is frozen'},
                         status=status.HTTP_403_FORBIDDEN
                     )
+
+                # Handle cross-currency transfers with rate-lock mechanism
+                exchange_rate_obj = None
+                converted_amount = amount
+                
+                if sender_wallet.currency != recipient_wallet.currency:
+                    # Cross-currency transfer - look up exchange rate
+                    try:
+                        from wallet.services.exchange_rates import get_active_exchange_rate
+
+                        exchange_rate_obj = get_active_exchange_rate(
+                            sender_wallet.currency,
+                            recipient_wallet.currency,
+                        )
+                        
+                        if not exchange_rate_obj:
+                            TransferAttempt.objects.create(
+                                user=sender,
+                                recipient_handle_input=recipient_handle,
+                                amount=amount,
+                                currency=currency,
+                                rejection_reason='no_exchange_rate'
+                            )
+                            return Response(
+                                {'code': 'no_exchange_rate', 'message': f'No exchange rate available for {sender_wallet.currency} to {recipient_wallet.currency}'},
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                        
+                        # Calculate recipient's amount using the locked rate
+                        converted_amount = amount * exchange_rate_obj.rate
+                        
+                    except Exception as e:
+                        logger.error(f'exchange_rate_lookup_error: {str(e)}')
+                        TransferAttempt.objects.create(
+                            user=sender,
+                            recipient_handle_input=recipient_handle,
+                            amount=amount,
+                            currency=currency,
+                            rejection_reason='exchange_rate_error'
+                        )
+                        return Response(
+                            {'code': 'exchange_rate_error', 'message': 'Error looking up exchange rate'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                        )
                 
                 # Prevent sending to self
                 if recipient == sender:
@@ -887,18 +1072,19 @@ class TransferView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
-                # Create transaction
+                # Create transaction with exchange rate if cross-currency
                 transaction_obj = Transaction.objects.create(
                     type=TransactionType.P2P_TRANSFER,
                     sender=sender,
                     recipient=recipient,
                     amount=amount,
-                    currency=currency,
+                    currency=sender_wallet.currency,  # Always store in sender's currency
                     note=note,
-                    status=TransactionStatus.COMPLETED
+                    status=TransactionStatus.COMPLETED,
+                    exchange_rate=exchange_rate_obj  # Store the locked rate for cross-currency transfers
                 )
                 
-                # Create ledger entries (debit sender, credit recipient)
+                # Create ledger entries (debit sender, credit recipient with converted amount)
                 LedgerEntry.objects.create(
                     wallet=sender_wallet,
                     transaction=transaction_obj,
@@ -910,7 +1096,7 @@ class TransferView(APIView):
                     wallet=recipient_wallet,
                     transaction=transaction_obj,
                     direction=LedgerDirection.CREDIT,
-                    amount=amount
+                    amount=converted_amount  # Use converted amount for recipient
                 )
                 
                 # Record idempotency key
@@ -2061,6 +2247,35 @@ def admin_audit_log(request):
 )
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
+def admin_reconciliation_last_run(request):
+    from wallet.services.reconciliation import get_reconciliation_last_run
+
+    return Response(get_reconciliation_last_run() or {'status': 'never_run'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(
+    responses={202: dict},
+    tags=['Admin']
+)
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_reconciliation_run(request):
+    from wallet.tasks import reconcile_balances_task
+
+    fix = request.data.get('fix', False)
+    async_result = reconcile_balances_task.delay(fix=fix)
+    return Response(
+        {'status': 'queued', 'task_id': async_result.id},
+        status=status.HTTP_202_ACCEPTED,
+    )
+
+
+@extend_schema(
+    responses={200: dict},
+    tags=['Admin']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
 def admin_settings_list(request):
     try:
         settings = SystemSetting.objects.order_by('key')
@@ -2618,15 +2833,170 @@ def get_qr_payload(request):
         )
 
 
-def verify_qr_signature(payload_json, signature):
-    """Verify a QR payload's HMAC signature."""
-    secret = get_qr_signing_secret()
-    expected_sig = hmac.new(
-        secret.encode(),
-        payload_json.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected_sig, signature)
+@extend_schema(
+    request={'type': 'object', 'properties': {'encoded': {'type': 'string'}}},
+    responses={200: dict, 400: dict},
+    tags=['QR']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def verify_qr_payload(request):
+    """Verify and decode a QR code payload."""
+    try:
+        encoded = request.data.get('encoded', '').strip()
+        
+        if not encoded:
+            return Response(
+                {'error': 'Encoded payload is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Decode the base64 payload
+        try:
+            decoded = base64.b64decode(encoded).decode()
+            payload_json, signature = decoded.rsplit('|', 1)
+        except Exception:
+            return Response(
+                {'error': 'Invalid encoded payload format'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify the signature
+        if not verify_qr_signature(payload_json, signature):
+            return Response(
+                {'error': 'Invalid signature'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Parse the payload
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return Response(
+                {'error': 'Invalid payload JSON'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check expiration
+        exp = payload.get('exp')
+        if exp:
+            from datetime import datetime as dt
+            from datetime import timezone as datetime_timezone
+            exp_time = dt.fromtimestamp(exp, tz=datetime_timezone.utc)
+            if timezone.now() > exp_time:
+                return Response(
+                    {'error': 'QR code has expired'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Validate payload structure
+        if payload.get('type') not in ('pay', 'merchant_pay'):
+            return Response(
+                {'error': 'Invalid QR code type'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        handle = payload.get('handle')
+        if not handle:
+            return Response(
+                {'error': 'Missing handle in payload'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Resolve the user
+        try:
+            user = User.objects.get(handle=handle, status=UserStatus.ACTIVE)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found or inactive'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        return Response(
+            {
+                'valid': True,
+                'handle': user.handle,
+                'display_name': user.display_name,
+                'avatar_url': user.avatar_url,
+                'amount': payload.get('amount'),
+                'note': payload.get('note', '')
+            },
+            status=status.HTTP_200_OK
+        )
+    
+    except Exception as e:
+        logger.error(f'verify_qr_payload_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def pay_qr_payload(request):
+    """Pay a signed user QR code after the payer confirms the amount."""
+    encoded = str(request.data.get('encoded', '')).strip()
+    amount = request.data.get('amount')
+    if not encoded or amount in (None, ''):
+        return Response({'error': 'encoded and amount are required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        decoded = base64.b64decode(encoded).decode()
+        payload_json, signature = decoded.rsplit('|', 1)
+        if not verify_qr_signature(payload_json, signature):
+            return Response({'error': 'Invalid signature'}, status=status.HTTP_400_BAD_REQUEST)
+        payload = json.loads(payload_json)
+        if payload.get('type') not in ('pay', 'merchant_pay') or (payload.get('exp') and timezone.now().timestamp() > payload['exp']):
+            return Response({'error': 'QR code is invalid or expired'}, status=status.HTTP_400_BAD_REQUEST)
+        recipient = User.objects.get(handle=payload['handle'], status=UserStatus.ACTIVE)
+        if recipient == request.user:
+            return Response({'error': 'Cannot pay yourself'}, status=status.HTTP_400_BAD_REQUEST)
+        transfer_serializer = TransferRequestSerializer(data={
+            'recipient_handle': recipient.handle,
+            'amount': amount,
+            'currency': request.data.get('currency', 'USD'),
+            'note': request.data.get('note') or payload.get('note', 'QR payment'),
+            'idempotency_key': request.data.get('idempotency_key') or uuid.uuid4().hex,
+        })
+        if not transfer_serializer.is_valid():
+            return Response(transfer_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        transfer_request = APIRequestFactory().post('/api/transfers', transfer_serializer.validated_data, format='json')
+        force_authenticate(transfer_request, user=request.user)
+        return TransferView.as_view()(transfer_request)
+    except User.DoesNotExist:
+        return Response({'error': 'User not found or inactive'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        logger.exception('pay_qr_payload_error')
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_linked_providers(request):
+    providers = request.user.linked_providers.order_by('-created_at')
+    return Response([
+        {'id': item.id, 'provider': item.provider, 'masked_reference': item.masked_reference,
+         'verification_status': item.verification_status, 'created_at': item.created_at}
+        for item in providers
+    ])
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def link_mobile_money_provider(request):
+    provider = str(request.data.get('provider', '')).strip()
+    phone = str(request.data.get('phone_number', '')).strip()
+    valid = [choice[0] for choice in LinkedProvider.ProviderType.choices]
+    if provider not in valid or len(phone) < 7:
+        return Response({'error': 'provider and a valid phone_number are required'}, status=status.HTTP_400_BAD_REQUEST)
+    linked, _ = LinkedProvider.objects.update_or_create(
+        user=request.user, provider=provider,
+        defaults={'masked_reference': f'****{phone[-4:]}', 'verification_status': 'verified',
+                  'provider_metadata': {'phone_number': phone, 'simulation': True}},
+    )
+    return Response({'id': linked.id, 'provider': linked.provider, 'masked_reference': linked.masked_reference,
+                     'verification_status': linked.verification_status, 'simulation': True}, status=status.HTTP_201_CREATED)
 
 
 # ---- BILL SPLITTING (A3) ----
@@ -2771,6 +3141,100 @@ def create_split(request):
 
 
 @extend_schema(
+    responses={200: dict, 400: dict, 404: dict},
+    tags=['Splits']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_split(request, split_id):
+    """Cancel a split request with cascade to child payment requests."""
+    try:
+        with transaction.atomic():
+            split = SplitRequest.objects.select_for_update().get(id=split_id)
+
+            # Check if the user is the creator
+            if request.user != split.creator:
+                return Response(
+                    {'error': 'Only the creator can cancel this split'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Check if split is already cancelled
+            if split.status == SplitRequest.SplitStatus.CANCELLED:
+                return Response(
+                    {'error': 'Split is already cancelled'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Check if split is already paid
+            if split.status == SplitRequest.SplitStatus.PAID:
+                return Response(
+                    {'error': 'Cannot cancel a paid split'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Cancel all associated payment requests
+            participants = split.participants.select_related('payment_request').all()
+            cancelled_count = 0
+
+            for participant in participants:
+                payment_request = participant.payment_request
+                if payment_request.status == PaymentRequestStatus.PENDING:
+                    payment_request.status = PaymentRequestStatus.CANCELLED
+                    payment_request.save()
+                    cancelled_count += 1
+
+                    # Notify the payer
+                    create_notification(
+                        payment_request.payer,
+                        'payment_request_cancelled',
+                        {
+                            'requester_handle': split.creator.handle,
+                            'split_id': split.id,
+                            'payment_request_id': payment_request.id
+                        }
+                    )
+
+            # Update split status
+            split.status = SplitRequest.SplitStatus.CANCELLED
+            split.cancellation_reason = request.data.get('reason', 'Cancelled by creator')
+            split.save()
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='split_cancelled',
+                metadata={
+                    'split_id': split.id,
+                    'cancelled_payment_requests': cancelled_count,
+                    'reason': split.cancellation_reason
+                }
+            )
+
+            return Response(
+                {
+                    'id': split.id,
+                    'status': split.status,
+                    'cancelled_payment_requests': cancelled_count,
+                    'message': f'Split cancelled and {cancelled_count} payment requests cancelled'
+                },
+                status=status.HTTP_200_OK
+            )
+
+    except SplitRequest.DoesNotExist:
+        return Response(
+            {'error': 'Split not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'cancel_split_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
     responses={200: dict},
     tags=['Splits']
 )
@@ -2828,6 +3292,1246 @@ def get_split_detail(request, split_id):
         )
     except Exception as e:
         logger.error(f'get_split_detail_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request=DisputeCreateSerializer,
+    responses={200: DisputeSerializer, 400: dict, 404: dict},
+    tags=['Disputes']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_dispute(request):
+    """
+    Create a dispute on a transaction.
+    Users can only dispute transactions they were party to (sender or recipient).
+    """
+    serializer = DisputeCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    transaction_id = serializer.validated_data['transaction_id']
+    reason = serializer.validated_data['reason']
+    evidence_notes = serializer.validated_data.get('evidence_notes', '')
+
+    try:
+        with transaction.atomic():
+            # Get the transaction
+            trans = Transaction.objects.get(id=transaction_id)
+
+            # Verify the user was party to the transaction
+            if trans.sender != request.user and trans.recipient != request.user:
+                return Response(
+                    {'error': 'You can only dispute transactions you were party to'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Check if a dispute already exists for this transaction by this user
+            if Dispute.objects.filter(transaction=trans, opened_by=request.user).exists():
+                return Response(
+                    {'error': 'You already have an open dispute for this transaction'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create the dispute
+            dispute = Dispute.objects.create(
+                transaction=trans,
+                opened_by=request.user,
+                reason=reason,
+                evidence_notes=evidence_notes,
+                status=DisputeStatus.OPEN
+            )
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='dispute_created',
+                metadata={
+                    'dispute_id': dispute.id,
+                    'transaction_id': str(transaction_id),
+                    'reason': reason
+                }
+            )
+
+            # Notify admins about the new dispute
+            logger.info(
+                json.dumps({
+                    'event': 'dispute_created',
+                    'dispute_id': dispute.id,
+                    'transaction_id': str(transaction_id),
+                    'opened_by': str(request.user.id),
+                    'timestamp': timezone.now().isoformat()
+                })
+            )
+
+            return Response(
+                DisputeSerializer(dispute).data,
+                status=status.HTTP_201_CREATED
+            )
+
+    except Transaction.DoesNotExist:
+        return Response(
+            {'error': 'Transaction not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'create_dispute_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: DisputeSerializer(many=True), 400: dict},
+    tags=['Disputes']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_disputes(request):
+    """
+    List disputes for the current user.
+    Supports filtering by status via query param.
+    """
+    status_filter = request.query_params.get('status', None)
+
+    disputes = Dispute.objects.filter(opened_by=request.user)
+
+    if status_filter:
+        valid_statuses = [choice[0] for choice in DisputeStatus.choices]
+        if status_filter not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Valid options: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        disputes = disputes.filter(status=status_filter)
+
+    disputes = disputes.order_by('-created_at')
+
+    return Response(
+        DisputeSerializer(disputes, many=True).data,
+        status=status.HTTP_200_OK
+    )
+
+
+@extend_schema(
+    responses={200: DisputeSerializer, 404: dict},
+    tags=['Disputes']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_dispute_detail(request, dispute_id):
+    """
+    Get details of a specific dispute.
+    Users can only view disputes they opened.
+    """
+    try:
+        dispute = Dispute.objects.get(id=dispute_id)
+
+        # Check if the user owns this dispute or is an admin
+        if dispute.opened_by != request.user and not request.user.is_staff:
+            return Response(
+                {'error': 'Access denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return Response(
+            DisputeSerializer(dispute).data,
+            status=status.HTTP_200_OK
+        )
+
+    except Dispute.DoesNotExist:
+        return Response(
+            {'error': 'Dispute not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'get_dispute_detail_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request=DisputeResolveSerializer,
+    responses={200: DisputeSerializer, 400: dict, 404: dict},
+    tags=['Disputes']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def resolve_dispute(request, dispute_id):
+    """
+    Resolve a dispute (admin only).
+    Can reverse the transaction or deny the dispute.
+    """
+    if not request.user.is_staff:
+        return Response(
+            {'error': 'Admin access required'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    serializer = DisputeResolveSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    resolution = serializer.validated_data['resolution']
+    resolution_notes = serializer.validated_data.get('resolution_notes', '')
+
+    try:
+        with transaction.atomic():
+            dispute = Dispute.objects.select_for_update().get(id=dispute_id)
+
+            # Check if dispute is already resolved
+            if dispute.status in [DisputeStatus.RESOLVED_REVERSED, DisputeStatus.RESOLVED_DENIED]:
+                return Response(
+                    {'error': 'Dispute has already been resolved'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Update dispute status
+            if resolution == 'reverse':
+                dispute.status = DisputeStatus.UNDER_REVIEW
+                dispute.status = DisputeStatus.RESOLVED_REVERSED
+                dispute.resolved_by = request.user
+                dispute.resolved_at = timezone.now()
+                dispute.resolution_notes = resolution_notes
+                
+            elif resolution == 'deny':
+                dispute.status = DisputeStatus.RESOLVED_DENIED
+                dispute.resolved_by = request.user
+                dispute.resolved_at = timezone.now()
+                dispute.resolution_notes = resolution_notes
+
+            dispute.save()
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='dispute_resolved',
+                metadata={
+                    'dispute_id': dispute.id,
+                    'resolution': resolution,
+                    'resolution_notes': resolution_notes
+                }
+            )
+
+            # Notify the user who opened the dispute
+            create_notification(
+                dispute.opened_by,
+                'dispute_resolved',
+                {
+                    'dispute_id': dispute.id,
+                    'resolution': resolution,
+                    'resolution_notes': resolution_notes,
+                    'resolved_by': request.user.handle
+                }
+            )
+
+            return Response(
+                DisputeSerializer(dispute).data,
+                status=status.HTTP_200_OK
+            )
+
+    except Dispute.DoesNotExist:
+        return Response(
+            {'error': 'Dispute not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'resolve_dispute_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: DisputeSerializer(many=True)},
+    tags=['Disputes']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_list_disputes(request):
+    """
+    List all disputes (admin only).
+    Supports filtering by status via query param.
+    """
+    if not request.user.is_staff:
+        return Response(
+            {'error': 'Admin access required'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    status_filter = request.query_params.get('status', None)
+
+    disputes = Dispute.objects.all()
+
+    if status_filter:
+        valid_statuses = [choice[0] for choice in DisputeStatus.choices]
+        if status_filter not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Valid options: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        disputes = disputes.filter(status=status_filter)
+
+    disputes = disputes.order_by('-created_at')
+
+    return Response(
+        DisputeSerializer(disputes, many=True).data,
+        status=status.HTTP_200_OK
+    )
+
+@extend_schema(
+    request=MobileMoneyTopupSerializer,
+    responses={201: MobileMoneyTransactionSerializer, 400: dict, 404: dict},
+    tags=['Mobile Money']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mobile_money_topup(request):
+    """
+    Initiate a mobile money top-up.
+    User must have a linked mobile money provider account.
+    """
+    serializer = MobileMoneyTopupSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    linked_provider_id = serializer.validated_data['linked_provider_id']
+    amount = serializer.validated_data['amount']
+    currency = serializer.validated_data['currency']
+
+    try:
+        with transaction.atomic():
+            # Get the linked provider
+            try:
+                linked_provider = LinkedProvider.objects.get(
+                    id=linked_provider_id,
+                    user=request.user,
+                    verification_status='verified'
+                )
+            except LinkedProvider.DoesNotExist:
+                return Response(
+                    {'error': 'Linked provider not found or not verified'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Get user's wallet in the requested currency
+            try:
+                wallet = Wallet.objects.get(user=request.user, currency=currency)
+            except Wallet.DoesNotExist:
+                return Response(
+                    {'error': f'Wallet for currency {currency} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Create mobile money transaction
+            mm_transaction = MobileMoneyTransaction.objects.create(
+                user=request.user,
+                wallet=wallet,
+                linked_provider=linked_provider,
+                type=MobileMoneyTransactionType.TOPUP,
+                amount=amount,
+                currency=currency,
+                status=MobileMoneyTransactionStatus.PENDING
+            )
+
+            # In a real implementation, this would call the provider's API
+            # For now, we'll simulate the provider call
+            # TODO: Integrate with MTN MoMo, Airtel Money, or Orange Money APIs
+            provider_transaction_id = f"PROV-{uuid.uuid4().hex[:16]}"
+            mm_transaction.provider_transaction_id = provider_transaction_id
+            mm_transaction.status = MobileMoneyTransactionStatus.PROCESSING
+            mm_transaction.save()
+            from wallet.tasks import process_mobile_money_webhook
+            process_mobile_money_webhook.delay(provider_transaction_id, 'completed', {'simulation': True})
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='mobile_money_topup_initiated',
+                metadata={
+                    'mm_transaction_id': mm_transaction.id,
+                    'provider_transaction_id': provider_transaction_id,
+                    'amount': str(amount),
+                    'currency': currency,
+                    'provider': linked_provider.provider
+                }
+            )
+
+            return Response(
+                MobileMoneyTransactionSerializer(mm_transaction).data,
+                status=status.HTTP_201_CREATED
+            )
+
+    except Exception as e:
+        logger.error(f'mobile_money_topup_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request=MobileMoneyWithdrawalSerializer,
+    responses={201: MobileMoneyTransactionSerializer, 400: dict, 404: dict},
+    tags=['Mobile Money']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mobile_money_withdrawal(request):
+    """
+    Initiate a mobile money withdrawal.
+    User must have sufficient balance and a linked mobile money provider account.
+    """
+    serializer = MobileMoneyWithdrawalSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    linked_provider_id = serializer.validated_data['linked_provider_id']
+    amount = serializer.validated_data['amount']
+    currency = serializer.validated_data['currency']
+
+    try:
+        with transaction.atomic():
+            # Get the linked provider
+            try:
+                linked_provider = LinkedProvider.objects.get(
+                    id=linked_provider_id,
+                    user=request.user,
+                    verification_status='verified'
+                )
+            except LinkedProvider.DoesNotExist:
+                return Response(
+                    {'error': 'Linked provider not found or not verified'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Get user's wallet in the requested currency
+            try:
+                wallet = Wallet.objects.select_for_update().get(user=request.user, currency=currency)
+            except Wallet.DoesNotExist:
+                return Response(
+                    {'error': f'Wallet for currency {currency} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Check balance
+            current_balance = wallet.get_balance()
+            if current_balance < amount:
+                return Response(
+                    {'error': 'Insufficient balance'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create mobile money transaction
+            mm_transaction = MobileMoneyTransaction.objects.create(
+                user=request.user,
+                wallet=wallet,
+                linked_provider=linked_provider,
+                type=MobileMoneyTransactionType.WITHDRAWAL,
+                amount=amount,
+                currency=currency,
+                status=MobileMoneyTransactionStatus.PENDING
+            )
+
+            # In a real implementation, this would call the provider's API
+            # For now, we'll simulate the provider call
+            # TODO: Integrate with MTN MoMo, Airtel Money, or Orange Money APIs
+            provider_transaction_id = f"PROV-{uuid.uuid4().hex[:16]}"
+            mm_transaction.provider_transaction_id = provider_transaction_id
+            mm_transaction.status = MobileMoneyTransactionStatus.PROCESSING
+            mm_transaction.save()
+            from wallet.tasks import process_mobile_money_webhook
+            process_mobile_money_webhook.delay(provider_transaction_id, 'completed', {'simulation': True})
+
+            # Create a debit ledger entry to hold the funds
+            LedgerEntry.objects.create(
+                wallet=wallet,
+                transaction=None,  # Will be updated when completed
+                direction=LedgerDirection.DEBIT,
+                amount=amount
+            )
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='mobile_money_withdrawal_initiated',
+                metadata={
+                    'mm_transaction_id': mm_transaction.id,
+                    'provider_transaction_id': provider_transaction_id,
+                    'amount': str(amount),
+                    'currency': currency,
+                    'provider': linked_provider.provider
+                }
+            )
+
+            return Response(
+                MobileMoneyTransactionSerializer(mm_transaction).data,
+                status=status.HTTP_201_CREATED
+            )
+
+    except Exception as e:
+        logger.error(f'mobile_money_withdrawal_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request={'type': 'object', 'properties': {'provider_transaction_id': {'type': 'string'}, 'status': {'type': 'string'}, 'response': {'type': 'object'}}},
+    responses={200: dict, 400: dict, 404: dict},
+    tags=['Mobile Money']
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Webhooks are called by providers, not users
+def mobile_money_webhook(request):
+    """
+    Webhook endpoint for mobile money providers to update transaction status.
+    Validates the payload, enqueues processing, and returns 200 immediately.
+    """
+    provider_transaction_id = request.data.get('provider_transaction_id')
+    webhook_status = request.data.get('status')
+    provider_response = request.data.get('response', {})
+
+    if not provider_transaction_id or not webhook_status:
+        return Response(
+            {'error': 'provider_transaction_id and status are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        from wallet.tasks import process_mobile_money_webhook
+
+        process_mobile_money_webhook.delay(
+            provider_transaction_id=provider_transaction_id,
+            status=webhook_status,
+            provider_response=provider_response,
+        )
+        return Response({'status': 'queued'}, status=status.HTTP_200_OK)
+    except Exception as e:
+        logger.error(f'mobile_money_webhook_enqueue_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: MobileMoneyTransactionSerializer(many=True)},
+    tags=['Mobile Money']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_mobile_money_transactions(request):
+    """
+    List mobile money transactions for the current user.
+    Supports filtering by type and status via query params.
+    """
+    type_filter = request.query_params.get('type', None)
+    status_filter = request.query_params.get('status', None)
+
+    transactions = MobileMoneyTransaction.objects.filter(user=request.user)
+
+    if type_filter:
+        valid_types = [choice[0] for choice in MobileMoneyTransactionType.choices]
+        if type_filter not in valid_types:
+            return Response(
+                {'error': f'Invalid type. Valid options: {valid_types}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        transactions = transactions.filter(type=type_filter)
+
+    if status_filter:
+        valid_statuses = [choice[0] for choice in MobileMoneyTransactionStatus.choices]
+        if status_filter not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Valid options: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        transactions = transactions.filter(status=status_filter)
+
+    transactions = transactions.order_by('-created_at')
+
+    return Response(
+        MobileMoneyTransactionSerializer(transactions, many=True).data,
+        status=status.HTTP_200_OK
+    )
+
+
+@extend_schema(
+    request=ScheduledTransferCreateSerializer,
+    responses={201: ScheduledTransferSerializer, 400: dict, 404: dict},
+    tags=['Scheduled Transfers']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_scheduled_transfer(request):
+    """
+    Create a new scheduled/recurring transfer.
+    """
+    serializer = ScheduledTransferCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    recipient_handle = serializer.validated_data['recipient_handle']
+    amount = serializer.validated_data['amount']
+    currency = serializer.validated_data['currency']
+    frequency = serializer.validated_data['frequency']
+    start_date = serializer.validated_data['start_date']
+    end_date = serializer.validated_data.get('end_date')
+    max_executions = serializer.validated_data.get('max_executions')
+    note = serializer.validated_data.get('note', '')
+
+    try:
+        with transaction.atomic():
+            # Resolve recipient
+            try:
+                recipient = User.objects.get(
+                    handle=recipient_handle,
+                    status=UserStatus.ACTIVE
+                )
+            except User.DoesNotExist:
+                return Response(
+                    {'error': 'Recipient not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Check sender's wallet
+            try:
+                sender_wallet = Wallet.objects.get(user=request.user, currency=currency)
+            except Wallet.DoesNotExist:
+                return Response(
+                    {'error': f'Wallet for currency {currency} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Check recipient's wallet
+            try:
+                recipient_wallet = Wallet.objects.get(user=recipient, currency=currency)
+            except Wallet.DoesNotExist:
+                return Response(
+                    {'error': f'Recipient does not have a wallet for currency {currency}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Prevent sending to self
+            if recipient == request.user:
+                return Response(
+                    {'error': 'Cannot create scheduled transfer to yourself'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create scheduled transfer
+            scheduled_transfer = ScheduledTransfer.objects.create(
+                sender=request.user,
+                recipient=recipient,
+                amount=amount,
+                currency=currency,
+                frequency=frequency,
+                next_execution=start_date,
+                end_date=end_date,
+                max_executions=max_executions,
+                status=ScheduledTransferStatus.ACTIVE,
+                note=note
+            )
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='scheduled_transfer_created',
+                metadata={
+                    'scheduled_transfer_id': scheduled_transfer.id,
+                    'recipient_handle': recipient_handle,
+                    'amount': str(amount),
+                    'currency': currency,
+                    'frequency': frequency,
+                    'start_date': start_date.isoformat()
+                }
+            )
+
+            return Response(
+                ScheduledTransferSerializer(scheduled_transfer).data,
+                status=status.HTTP_201_CREATED
+            )
+
+    except Exception as e:
+        logger.error(f'create_scheduled_transfer_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: ScheduledTransferSerializer(many=True)},
+    tags=['Scheduled Transfers']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_scheduled_transfers(request):
+    """
+    List scheduled transfers for the current user.
+    Supports filtering by status via query param.
+    """
+    status_filter = request.query_params.get('status', None)
+
+    transfers = ScheduledTransfer.objects.filter(sender=request.user)
+
+    if status_filter:
+        valid_statuses = [choice[0] for choice in ScheduledTransferStatus.choices]
+        if status_filter not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Valid options: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        transfers = transfers.filter(status=status_filter)
+
+    transfers = transfers.order_by('-created_at')
+
+    return Response(
+        ScheduledTransferSerializer(transfers, many=True).data,
+        status=status.HTTP_200_OK
+    )
+
+
+@extend_schema(
+    responses={200: ScheduledTransferSerializer, 404: dict},
+    tags=['Scheduled Transfers']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_scheduled_transfer_detail(request, transfer_id):
+    """
+    Get details of a specific scheduled transfer.
+    """
+    try:
+        scheduled_transfer = ScheduledTransfer.objects.get(
+            id=transfer_id,
+            sender=request.user
+        )
+        return Response(
+            ScheduledTransferSerializer(scheduled_transfer).data,
+            status=status.HTTP_200_OK
+        )
+    except ScheduledTransfer.DoesNotExist:
+        return Response(
+            {'error': 'Scheduled transfer not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@extend_schema(
+    responses={200: dict, 404: dict},
+    tags=['Scheduled Transfers']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def pause_scheduled_transfer(request, transfer_id):
+    """
+    Pause an active scheduled transfer.
+    """
+    try:
+        with transaction.atomic():
+            scheduled_transfer = ScheduledTransfer.objects.select_for_update().get(
+                id=transfer_id,
+                sender=request.user
+            )
+
+            if scheduled_transfer.status != ScheduledTransferStatus.ACTIVE:
+                return Response(
+                    {'error': 'Can only pause active scheduled transfers'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            scheduled_transfer.status = ScheduledTransferStatus.PAUSED
+            scheduled_transfer.save()
+
+            AuditLog.objects.create(
+                user=request.user,
+                action='scheduled_transfer_paused',
+                metadata={'scheduled_transfer_id': transfer_id}
+            )
+
+            return Response(
+                {'message': 'Scheduled transfer paused'},
+                status=status.HTTP_200_OK
+            )
+    except ScheduledTransfer.DoesNotExist:
+        return Response(
+            {'error': 'Scheduled transfer not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@extend_schema(
+    responses={200: dict, 404: dict},
+    tags=['Scheduled Transfers']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def resume_scheduled_transfer(request, transfer_id):
+    """
+    Resume a paused scheduled transfer.
+    """
+    try:
+        with transaction.atomic():
+            scheduled_transfer = ScheduledTransfer.objects.select_for_update().get(
+                id=transfer_id,
+                sender=request.user
+            )
+
+            if scheduled_transfer.status != ScheduledTransferStatus.PAUSED:
+                return Response(
+                    {'error': 'Can only resume paused scheduled transfers'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            scheduled_transfer.status = ScheduledTransferStatus.ACTIVE
+            scheduled_transfer.save()
+
+            AuditLog.objects.create(
+                user=request.user,
+                action='scheduled_transfer_resumed',
+                metadata={'scheduled_transfer_id': transfer_id}
+            )
+
+            return Response(
+                {'message': 'Scheduled transfer resumed'},
+                status=status.HTTP_200_OK
+            )
+    except ScheduledTransfer.DoesNotExist:
+        return Response(
+            {'error': 'Scheduled transfer not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@extend_schema(
+    responses={200: dict, 404: dict},
+    tags=['Scheduled Transfers']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_scheduled_transfer(request, transfer_id):
+    """
+    Cancel a scheduled transfer.
+    """
+    try:
+        with transaction.atomic():
+            scheduled_transfer = ScheduledTransfer.objects.select_for_update().get(
+                id=transfer_id,
+                sender=request.user
+            )
+
+            if scheduled_transfer.status in [ScheduledTransferStatus.CANCELLED, ScheduledTransferStatus.COMPLETED]:
+                return Response(
+                    {'error': 'Cannot cancel a cancelled or completed scheduled transfer'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            scheduled_transfer.status = ScheduledTransferStatus.CANCELLED
+            scheduled_transfer.save()
+
+            AuditLog.objects.create(
+                user=request.user,
+                action='scheduled_transfer_cancelled',
+                metadata={'scheduled_transfer_id': transfer_id}
+            )
+
+            return Response(
+                {'message': 'Scheduled transfer cancelled'},
+                status=status.HTTP_200_OK
+            )
+    except ScheduledTransfer.DoesNotExist:
+        return Response(
+            {'error': 'Scheduled transfer not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@extend_schema(
+    request=MerchantCreateSerializer,
+    responses={201: MerchantSerializer, 400: dict},
+    tags=['Merchants']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_merchant_account(request):
+    """
+    Create a merchant account application.
+    Requires admin approval before activation.
+    """
+    serializer = MerchantCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    business_name = serializer.validated_data['business_name']
+    business_type = serializer.validated_data.get('business_type', '')
+    description = serializer.validated_data.get('description', '')
+    wallet_id = serializer.validated_data['wallet_id']
+    logo_url = serializer.validated_data.get('logo_url', '')
+    contact_email = serializer.validated_data.get('contact_email', '')
+    contact_phone = serializer.validated_data.get('contact_phone', '')
+    address = serializer.validated_data.get('address', '')
+    tax_id = serializer.validated_data.get('tax_id', '')
+
+    try:
+        with transaction.atomic():
+            # Check if user already has a merchant account
+            if hasattr(request.user, 'merchant_account'):
+                return Response(
+                    {'error': 'User already has a merchant account'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Get wallet
+            try:
+                wallet = Wallet.objects.get(id=wallet_id, user=request.user)
+            except Wallet.DoesNotExist:
+                return Response(
+                    {'error': 'Wallet not found or does not belong to user'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Create merchant account
+            merchant = Merchant.objects.create(
+                user=request.user,
+                business_name=business_name,
+                business_type=business_type,
+                description=description,
+                wallet=wallet,
+                logo_url=logo_url,
+                contact_email=contact_email,
+                contact_phone=contact_phone,
+                address=address,
+                tax_id=tax_id,
+                status=MerchantStatus.PENDING
+            )
+            sandbox_secret = secrets.token_urlsafe(32)
+            merchant.sandbox_public_key = f'test_pk_{secrets.token_urlsafe(18)}'
+            merchant.sandbox_secret_hash = hashlib.sha256(sandbox_secret.encode()).hexdigest()
+            merchant.credentials_issued_at = timezone.now()
+            merchant.save(update_fields=['sandbox_public_key', 'sandbox_secret_hash', 'credentials_issued_at'])
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='merchant_account_created',
+                metadata={'merchant_id': merchant.id, 'business_name': business_name}
+            )
+
+            return Response(
+                {**MerchantSerializer(merchant).data, 'sandbox_credentials': {'public_key': merchant.sandbox_public_key, 'secret_key': f'test_sk_{sandbox_secret}'}},
+                status=status.HTTP_201_CREATED
+            )
+
+    except Exception as e:
+        logger.error(f'create_merchant_account_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    responses={200: MerchantSerializer, 404: dict},
+    tags=['Merchants']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_merchant_account(request):
+    """
+    Get the current user's merchant account.
+    """
+    try:
+        merchant = Merchant.objects.get(user=request.user)
+        return Response(
+            MerchantSerializer(merchant).data,
+            status=status.HTTP_200_OK
+        )
+    except Merchant.DoesNotExist:
+        return Response(
+            {'error': 'Merchant account not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'generate_merchant_qr_error: {str(e)}')
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@extend_schema(
+    responses={200: dict, 404: dict},
+    tags=['Merchants']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def generate_merchant_qr(request):
+    """
+    Generate a static QR code for the merchant account.
+    QR code allows customers to pay the merchant without specifying amount.
+    """
+    try:
+        with transaction.atomic():
+            merchant = Merchant.objects.select_for_update().get(user=request.user)
+
+            if merchant.status != MerchantStatus.ACTIVE:
+                return Response(
+                    {'error': 'Merchant account must be active to generate QR code'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Generate static QR payload
+            payload = {
+                'type': 'merchant_pay',
+                'merchant_id': merchant.id,
+                'handle': request.user.handle,
+                'business_name': merchant.business_name,
+                'currency': merchant.wallet.currency
+            }
+
+            payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+            secret = get_qr_signing_secret()
+            signature = hmac.new(
+                secret.encode(),
+                payload_json.encode(),
+                hashlib.sha256
+            ).hexdigest()
+
+            # Generate unique QR code
+            qr_code = f"MERCHANT-{uuid.uuid4().hex[:16].upper()}"
+
+            merchant.static_qr_code = qr_code
+            merchant.static_qr_payload = payload_json
+            merchant.static_qr_signature = signature
+            merchant.save()
+
+            # Audit log
+            AuditLog.objects.create(
+                user=request.user,
+                action='merchant_qr_generated',
+                metadata={'merchant_id': merchant.id, 'qr_code': qr_code}
+            )
+
+            return Response(
+                {
+                    'qr_code': qr_code,
+                    'payload': payload_json,
+                    'signature': signature,
+                    'encoded': base64.b64encode((payload_json + '|' + signature).encode()).decode()
+                },
+                status=status.HTTP_200_OK
+            )
+
+    except Merchant.DoesNotExist:
+        return Response(
+            {'error': 'Merchant account not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def merchant_dashboard(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    transactions = Transaction.objects.filter(recipient=request.user, status=TransactionStatus.COMPLETED)
+    volume = transactions.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    return Response({'merchant': MerchantSerializer(merchant).data, 'today_volume': str(volume),
+                     'transaction_count': transactions.count(), 'pending_settlements': '0.00',
+                     'available_balance': str(merchant.wallet.get_balance()),
+                     'transactions': list(transactions.values('id', 'amount', 'currency', 'note', 'status', 'created_at')[:50]),
+                     'kyc_documents': list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')),
+                     'settlements': list(merchant.settlements.values('id', 'amount', 'fees', 'currency', 'batch_reference', 'status', 'destination', 'created_at'))})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def merchant_kyc_documents(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'POST':
+        document = KYCDocument.objects.create(merchant=merchant, document_type=request.data.get('document_type'), file_url=request.data.get('file_url'))
+        return Response({'id': document.id, 'document_type': document.document_type, 'status': document.status, 'file_url': document.file_url}, status=status.HTTP_201_CREATED)
+    return Response(list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def merchant_credentials(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    environment = request.data.get('environment', 'sandbox')
+    if environment == 'live' and merchant.status != MerchantStatus.ACTIVE:
+        return Response({'error': 'Live credentials require an approved merchant account'}, status=status.HTTP_403_FORBIDDEN)
+    secret = secrets.token_urlsafe(32)
+    public_key = f'{"live" if environment == "live" else "test"}_pk_{secrets.token_urlsafe(18)}'
+    if environment == 'live':
+        merchant.live_public_key = public_key
+        merchant.live_secret_hash = hashlib.sha256(secret.encode()).hexdigest()
+    else:
+        merchant.sandbox_public_key = public_key
+        merchant.sandbox_secret_hash = hashlib.sha256(secret.encode()).hexdigest()
+    merchant.credentials_issued_at = timezone.now()
+    merchant.save(update_fields=['live_public_key', 'live_secret_hash', 'sandbox_public_key', 'sandbox_secret_hash', 'credentials_issued_at'])
+    return Response({'environment': environment, 'public_key': public_key, 'secret_key': f'{"live" if environment == "live" else "test"}_sk_{secret}'})
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def merchant_webhook_config(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PATCH':
+        merchant.webhook_url = str(request.data.get('webhook_url', merchant.webhook_url)).strip()
+        merchant.save(update_fields=['webhook_url'])
+    return Response({'webhook_url': merchant.webhook_url, 'events': ['payment.success', 'payment.failed', 'refund.processed', 'payout.completed'], 'secret_configured': bool(merchant.webhook_secret)})
+@extend_schema(
+    responses={200: MerchantSerializer(many=True)},
+    tags=['Merchants']
+)
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_list_merchants(request):
+    """
+    List all merchant accounts (admin only).
+    Supports filtering by status via query param.
+    """
+    status_filter = request.query_params.get('status', None)
+
+    merchants = Merchant.objects.all()
+
+    if status_filter:
+        valid_statuses = [choice[0] for choice in MerchantStatus.choices]
+        if status_filter not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Valid options: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        merchants = merchants.filter(status=status_filter)
+
+    merchants = merchants.order_by('-created_at')
+
+    return Response(
+        MerchantSerializer(merchants, many=True).data,
+        status=status.HTTP_200_OK
+    )
+
+
+@extend_schema(
+    request=MerchantApprovalSerializer,
+    responses={200: dict, 400: dict, 404: dict},
+    tags=['Merchants']
+)
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_approve_merchant(request, merchant_id):
+    """
+    Approve or reject a merchant account (admin only).
+    """
+    serializer = MerchantApprovalSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    action = serializer.validated_data['action']
+    rejection_reason = serializer.validated_data.get('rejection_reason', '')
+
+    try:
+        with transaction.atomic():
+            merchant = Merchant.objects.select_for_update().get(id=merchant_id)
+
+            if merchant.status != MerchantStatus.PENDING:
+                return Response(
+                    {'error': 'Can only approve/reject pending merchant accounts'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if action == 'approve':
+                merchant.status = MerchantStatus.ACTIVE
+                merchant.approved_by = request.user
+                merchant.approved_at = timezone.now()
+                merchant.save()
+
+                # Audit log
+                AuditLog.objects.create(
+                    user=request.user,
+                    action='merchant_approved',
+                    metadata={'merchant_id': merchant.id, 'business_name': merchant.business_name}
+                )
+
+                # Notify the merchant
+                create_notification(
+                    merchant.user,
+                    'merchant_account_approved',
+                    {
+                        'merchant_id': merchant.id,
+                        'business_name': merchant.business_name
+                    }
+                )
+
+                try:
+                    from wallet.tasks import generate_merchant_api_keys_task
+                    generate_merchant_api_keys_task.delay(merchant.id)
+                except Exception:
+                    logger.exception('merchant_api_keys_enqueue_failed', extra={'merchant_id': merchant.id})
+
+                return Response(
+                    {'message': 'Merchant account approved'},
+                    status=status.HTTP_200_OK
+                )
+
+            elif action == 'reject':
+                merchant.status = MerchantStatus.REJECTED
+                merchant.rejection_reason = rejection_reason
+                merchant.approved_by = request.user
+                merchant.approved_at = timezone.now()
+                merchant.save()
+
+                # Audit log
+                AuditLog.objects.create(
+                    user=request.user,
+                    action='merchant_rejected',
+                    metadata={
+                        'merchant_id': merchant.id,
+                        'business_name': merchant.business_name,
+                        'rejection_reason': rejection_reason
+                    }
+                )
+
+                # Notify the merchant
+                create_notification(
+                    merchant.user,
+                    'merchant_account_rejected',
+                    {
+                        'merchant_id': merchant.id,
+                        'business_name': merchant.business_name,
+                        'rejection_reason': rejection_reason
+                    }
+                )
+
+                return Response(
+                    {'message': 'Merchant account rejected'},
+                    status=status.HTTP_200_OK
+                )
+
+    except Merchant.DoesNotExist:
+        return Response(
+            {'error': 'Merchant account not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'admin_approve_merchant_error: {str(e)}')
         return Response(
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR

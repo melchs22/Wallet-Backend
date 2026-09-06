@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 import os
+from urllib.parse import urlparse
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -30,37 +31,19 @@ def getenv_list(key: str, default):
         return default
     return [item.strip() for item in value.split(',') if item.strip()]
 
-# HARDCODED SETTINGS FOR RENDER DEPLOYMENT
-# Backend URL: https://wallet-backend-lqhq.onrender.com
-# Frontend URL: https://dsd-wallet.vercel.app
-
 # Django Configuration
-SECRET_KEY = 'django-insecure-change-this-to-a-secure-random-key-in-production-12345'
-DEBUG = False
-ALLOWED_HOSTS = [
-    'wallet-backend-lqhq.onrender.com',
-    'www.wallet-backend-lqhq.onrender.com',
-    'localhost',
-    '127.0.0.1',
-    'testserver',
-]
-
-# Database Configuration - SQLite for now
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-local-development-only')
+DEBUG = getenv_bool('DEBUG', False)
+ALLOWED_HOSTS = getenv_list('ALLOWED_HOSTS', ['localhost', '127.0.0.1', 'testserver'])
 
 # CORS Configuration
-FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'https://dsd-wallet.vercel.app')
+FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'http://178.128.156.225:3000')
 
 # Session Configuration
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = getenv_bool('SESSION_COOKIE_SECURE', True)
-SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'None')
+SESSION_COOKIE_SECURE = getenv_bool('SESSION_COOKIE_SECURE', False)
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
 SESSION_COOKIE_DOMAIN = None
 SESSION_COOKIE_AGE = 2592000  # 30 days
 SESSION_SAVE_EVERY_REQUEST = True
@@ -69,13 +52,13 @@ SESSION_REFRESH_AT_REQUEST = True
 API_ACCESS_TOKEN_MAX_AGE = int(os.getenv('API_ACCESS_TOKEN_MAX_AGE', '28800'))
 
 # CSRF Configuration
-CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', True)
-CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'None')
+CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', False)
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
 CSRF_COOKIE_HTTPONLY = True
 CSRF_TRUSTED_ORIGINS = getenv_list(
     'CSRF_TRUSTED_ORIGINS',
     [
-        'https://dsd-wallet.vercel.app',
+        'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
     ],
@@ -99,11 +82,13 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'drf_spectacular',
+    'django_celery_beat',
     'wallet',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -134,14 +119,23 @@ TEMPLATES = [
 WSGI_APPLICATION = 'walletmvp.wsgi.application'
 
 
-# Database Configuration - HARDCODED FOR RENDER DEPLOYMENT
-# Using SQLite for now
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+def database_from_url():
+    database_url = os.getenv('DATABASE_URL', '').strip()
+    if not database_url or database_url.startswith('sqlite'):
+        return {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'db.sqlite3'}
+    parsed = urlparse(database_url)
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': parsed.path.lstrip('/'),
+        'USER': parsed.username or '',
+        'PASSWORD': parsed.password or '',
+        'HOST': parsed.hostname or '',
+        'PORT': str(parsed.port or 5432),
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '60')),
     }
-}
+
+
+DATABASES = {'default': database_from_url()}
 
 
 # Custom user model
@@ -170,6 +164,18 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else []
+STORAGES = {
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
+
+# Media files (user uploads)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
@@ -196,6 +202,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/day',
         'user': '1000/day',
+        'merchant_api': '1000/hour',
     },
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'wallet.exceptions.custom_exception_handler',
@@ -229,7 +236,7 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = getenv_list(
     'CORS_ALLOWED_ORIGINS',
     [
-        'https://dsd-wallet.vercel.app',
+        'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
     ],
@@ -240,14 +247,14 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CORS_ALLOW_CREDENTIALS = True
 
 # For OAuth redirect URI
-FRONTEND_ORIGIN_URL = os.getenv('FRONTEND_ORIGIN_URL', 'https://dsd-wallet.vercel.app')
+FRONTEND_ORIGIN_URL = os.getenv('FRONTEND_ORIGIN_URL', FRONTEND_ORIGIN)
 
 
 # Session configuration
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = getenv_bool('SESSION_COOKIE_SECURE', True)
-SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'None')
+SESSION_COOKIE_SECURE = getenv_bool('SESSION_COOKIE_SECURE', False)
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
 SESSION_COOKIE_DOMAIN = None  # Let browser determine domain
 SESSION_COOKIE_AGE = 2592000  # 30 days (30 * 24 * 60 * 60)
 SESSION_SAVE_EVERY_REQUEST = True
@@ -257,13 +264,13 @@ SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 # CSRF configuration
 # For cross-origin API with session authentication, we disable CSRF for API endpoints
 # Session cookies provide sufficient protection for this use case
-CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', True)
-CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'None')
+CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', False)
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
 CSRF_COOKIE_HTTPONLY = True
 CSRF_TRUSTED_ORIGINS = getenv_list(
     'CSRF_TRUSTED_ORIGINS',
     [
-        'https://dsd-wallet.vercel.app',
+        'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
     ],
@@ -275,6 +282,38 @@ CSRF_EXEMPT_URLS = [
 ]
 
 
-# Google OAuth configuration - HARDCODED FOR RENDER DEPLOYMENT
-GOOGLE_CLIENT_ID = '256666248694-iocf5uppdg0n9sq5i2krtp96bp80nio7.apps.googleusercontent.com'
-GOOGLE_CLIENT_SECRET = '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'
+# Google OAuth configuration
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
+
+# QR Code signing secret for HMAC-signed payloads
+QR_SIGNING_SECRET = os.getenv('QR_SIGNING_SECRET', 'change-this-qr-secret-in-production-12345')
+
+# Celery + Redis
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', REDIS_URL)
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 300
+CELERY_TASK_SOFT_TIME_LIMIT = 240
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_TASK_ROUTES = {
+    'wallet.tasks.reconcile_balances_task': {'ignore_result': False},
+    'wallet.tasks.broadcast_notification_task': {'ignore_result': False},
+    'wallet.tasks.generate_transaction_export': {'ignore_result': False},
+}
+CELERY_TASK_ALWAYS_EAGER = getenv_bool('CELERY_TASK_ALWAYS_EAGER', TESTING)
+CELERY_TASK_EAGER_PROPAGATES = True
+
+# Exchange rates (exchangerate.fun)
+EXCHANGE_RATE_API_URL = os.getenv('EXCHANGE_RATE_API_URL', 'https://api.exchangerate.fun/latest')
+EXCHANGE_RATE_API_TIMEOUT = int(os.getenv('EXCHANGE_RATE_API_TIMEOUT', '15'))
+EXCHANGE_RATE_EXTRA_CURRENCIES = getenv_list(
+    'EXCHANGE_RATE_EXTRA_CURRENCIES',
+    ['USD', 'EUR', 'GBP', 'KES', 'NGN', 'ZAR', 'GHS'],
+)

@@ -11,12 +11,34 @@ def default_request_expiry():
     return timezone.now() + timedelta(days=7)
 
 
+def default_payment_intent_expiry():
+    return timezone.now() + timedelta(hours=24)
+
+
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, google_sub=None, handle=None, display_name=None, **extra_fields):
+        """
+        Create and save a regular User with the given email and password.
+        """
         if not email:
             raise ValueError('The Email field must be set')
         
         email = self.normalize_email(email)
+        
+        # Auto-generate display_name from email if not provided
+        if not display_name:
+            display_name = email.split('@')[0]
+        
+        # Auto-generate handle from email if not provided
+        if not handle:
+            handle = display_name.lower()
+            # Ensure handle is unique by adding a number if needed
+            base_handle = handle
+            counter = 1
+            while self.filter(handle=handle).exists():
+                handle = f"{base_handle}{counter}"
+                counter += 1
+        
         user = self.model(
             email=email,
             google_sub=google_sub,
@@ -42,6 +64,18 @@ class CustomUserManager(BaseUserManager):
             raise ValueError('Superuser must have is_staff=True.')
         if extra_fields.get('is_superuser') is not True:
             raise ValueError('Superuser must have is_superuser=True.')
+
+        # Auto-generate handle and display_name if not provided for createsuperuser
+        if not display_name:
+            display_name = email.split('@')[0]
+        if not handle:
+            handle = display_name.lower()
+            # Ensure handle is unique by adding a number if needed
+            base_handle = handle
+            counter = 1
+            while self.filter(handle=handle).exists():
+                handle = f"{base_handle}{counter}"
+                counter += 1
 
         return self.create_user(email, password, google_sub, handle, display_name, **extra_fields)
     
@@ -177,6 +211,7 @@ class Wallet(models.Model):
         choices=WalletStatus.choices,
         default=WalletStatus.ACTIVE
     )
+    is_sandbox = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def get_balance(self) -> Decimal:
@@ -239,15 +274,15 @@ class Transaction(models.Model):
         null=True,
         blank=True,
         related_name='transactions'
-    )  # B2: Store exchange rate used for cross-currency transfers
+    )  
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'transactions'
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['sender', 'created_at']),  # A6: Composite index for history
-            models.Index(fields=['recipient', 'created_at']),  # A6: Composite index for history
+            models.Index(fields=['sender', 'created_at']),  
+            models.Index(fields=['recipient', 'created_at']), 
         ]
 
 
@@ -518,3 +553,306 @@ class ExchangeRate(models.Model):
         indexes = [
             models.Index(fields=['from_currency', 'to_currency', 'valid_from']),
         ]
+
+
+class DisputeStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    UNDER_REVIEW = 'under_review', 'Under Review'
+    RESOLVED_REVERSED = 'resolved_reversed', 'Resolved (Reversed)'
+    RESOLVED_DENIED = 'resolved_denied', 'Resolved (Denied)'
+
+
+class Dispute(models.Model):
+    """
+    User-facing dispute flow for transactions.
+    Users can open disputes on transactions they were party to.
+    Admins review and resolve through the admin panel, reusing reversal logic.
+    """
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.PROTECT,
+        related_name='disputes'
+    )
+    opened_by = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='disputes_opened'
+    )
+    reason = models.TextField()
+    evidence_notes = models.TextField(blank=True, default='')
+    status = models.CharField(
+        max_length=20,
+        choices=DisputeStatus.choices,
+        default=DisputeStatus.OPEN
+    )
+    resolved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='disputes_resolved'
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'disputes'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['opened_by', 'status', 'created_at']),
+            models.Index(fields=['transaction', 'status']),
+        ]
+
+
+class MobileMoneyTransactionType(models.TextChoices):
+    TOPUP = 'topup', 'Top-up'
+    WITHDRAWAL = 'withdrawal', 'Withdrawal'
+
+
+class MobileMoneyTransactionStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    PROCESSING = 'processing', 'Processing'
+    COMPLETED = 'completed', 'Completed'
+    FAILED = 'failed', 'Failed'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class MobileMoneyTransaction(models.Model):
+    """
+    Track mobile money transactions (top-ups and withdrawals).
+    Integrates with MTN MoMo, Airtel Money, and Orange Money.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='mobile_money_transactions'
+    )
+    wallet = models.ForeignKey(
+        Wallet,
+        on_delete=models.CASCADE,
+        related_name='mobile_money_transactions'
+    )
+    linked_provider = models.ForeignKey(
+        LinkedProvider,
+        on_delete=models.PROTECT,
+        related_name='mobile_money_transactions'
+    )
+    type = models.CharField(
+        max_length=20,
+        choices=MobileMoneyTransactionType.choices
+    )
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    status = models.CharField(
+        max_length=20,
+        choices=MobileMoneyTransactionStatus.choices,
+        default=MobileMoneyTransactionStatus.PENDING
+    )
+    provider_transaction_id = models.CharField(max_length=100, blank=True, default='')
+    provider_reference = models.CharField(max_length=100, blank=True, default='')
+    provider_response = models.JSONField(default=dict, blank=True)
+    failure_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'mobile_money_transactions'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status', 'created_at']),
+            models.Index(fields=['linked_provider', 'status']),
+            models.Index(fields=['provider_transaction_id']),
+        ]
+
+
+class ScheduleFrequency(models.TextChoices):
+    DAILY = 'daily', 'Daily'
+    WEEKLY = 'weekly', 'Weekly'
+    BIWEEKLY = 'biweekly', 'Bi-weekly'
+    MONTHLY = 'monthly', 'Monthly'
+    YEARLY = 'yearly', 'Yearly'
+
+
+class ScheduledTransferStatus(models.TextChoices):
+    ACTIVE = 'active', 'Active'
+    PAUSED = 'paused', 'Paused'
+    CANCELLED = 'cancelled', 'Cancelled'
+    COMPLETED = 'completed', 'Completed'
+
+
+class ScheduledTransfer(models.Model):
+    """
+    Recurring and scheduled transfers.
+    Allows users to set up automatic transfers on a schedule.
+    """
+    sender = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='scheduled_transfers'
+    )
+    recipient = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='incoming_scheduled_transfers'
+    )
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    frequency = models.CharField(
+        max_length=20,
+        choices=ScheduleFrequency.choices
+    )
+    next_execution = models.DateTimeField()
+    last_execution = models.DateTimeField(null=True, blank=True)
+    end_date = models.DateTimeField(null=True, blank=True)  # Optional end date
+    total_executions = models.IntegerField(default=0)
+    max_executions = models.IntegerField(null=True, blank=True)  # Optional max executions
+    status = models.CharField(
+        max_length=20,
+        choices=ScheduledTransferStatus.choices,
+        default=ScheduledTransferStatus.ACTIVE
+    )
+    note = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'scheduled_transfers'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['sender', 'status', 'next_execution']),
+            models.Index(fields=['status', 'next_execution']),  # For background job queries
+        ]
+
+
+class MerchantStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    ACTIVE = 'active', 'Active'
+    SUSPENDED = 'suspended', 'Suspended'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class MerchantMode(models.TextChoices):
+    SANDBOX = 'sandbox', 'Sandbox'
+    LIVE = 'live', 'Live'
+
+
+class Merchant(models.Model):
+    """
+    Merchant/Business account model.
+    Allows businesses to receive payments via static QR codes.
+    """
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='merchant_account'
+    )
+    business_name = models.CharField(max_length=200)
+    business_email = models.EmailField(blank=True, default='')
+    website_url = models.URLField(blank=True, default='')
+    business_type = models.CharField(max_length=100, blank=True, default='')
+    description = models.TextField(blank=True, default='')
+    status = models.CharField(
+        max_length=20,
+        choices=MerchantStatus.choices,
+        default=MerchantStatus.PENDING
+    )
+    mode = models.CharField(max_length=10, choices=MerchantMode.choices, default=MerchantMode.SANDBOX)
+    webhook_url = models.URLField(blank=True, default='')
+    webhook_secret = models.CharField(max_length=64, blank=True, default='')
+    sandbox_public_key = models.CharField(max_length=80, blank=True, default='')
+    sandbox_secret_hash = models.CharField(max_length=128, blank=True, default='')
+    live_public_key = models.CharField(max_length=80, blank=True, default='')
+    live_secret_hash = models.CharField(max_length=128, blank=True, default='')
+    credentials_issued_at = models.DateTimeField(null=True, blank=True)
+    static_qr_code = models.CharField(max_length=255, unique=True, blank=True, null=True)
+    static_qr_payload = models.TextField(blank=True, default='')
+    static_qr_signature = models.CharField(max_length=255, blank=True, default='')
+    wallet = models.ForeignKey(
+        Wallet,
+        on_delete=models.PROTECT,
+        related_name='merchant_accounts'
+    )
+    sandbox_wallet = models.OneToOneField(
+        Wallet,
+        on_delete=models.SET_NULL,
+        related_name='sandbox_merchant_account',
+        null=True,
+        blank=True,
+    )
+    logo_url = models.URLField(blank=True, default='')
+    contact_email = models.EmailField(blank=True, default='')
+    contact_phone = models.CharField(max_length=20, blank=True, default='')
+    address = models.TextField(blank=True, default='')
+    tax_id = models.CharField(max_length=50, blank=True, default='')
+    approved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_merchants'
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'merchants'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['static_qr_code']),
+        ]
+
+
+class KYCDocument(models.Model):
+    class DocumentType(models.TextChoices):
+        REGISTRATION = 'registration', 'Business registration'
+        OWNER_ID = 'owner_id', 'Owner identity'
+        TAX_ID = 'tax_id', 'Tax document'
+        SETTLEMENT = 'settlement', 'Settlement destination'
+
+    class ReviewStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+        REUPLOAD = 'reupload', 'Re-upload required'
+
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='kyc_documents')
+    document_type = models.CharField(max_length=30, choices=DocumentType.choices)
+    file_url = models.URLField()
+    status = models.CharField(max_length=20, choices=ReviewStatus.choices, default=ReviewStatus.PENDING)
+    reviewer_notes = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_kyc_documents')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'wallet_kyc_documents'
+        ordering = ['-created_at']
+
+
+class Settlement(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='settlements')
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    fees = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('0.00'))
+    currency = models.CharField(max_length=3)
+    batch_reference = models.CharField(max_length=100, unique=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    destination = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'wallet_settlements'
+        ordering = ['-created_at']
