@@ -59,7 +59,7 @@ class Command(BaseCommand):
 
                 wallet = Wallet.objects.create(
                     user=user,
-                    currency='USD',
+                    currency='GNF',
                     status=WalletStatus.ACTIVE,
                 )
 

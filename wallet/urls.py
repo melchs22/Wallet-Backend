@@ -1,7 +1,7 @@
 from django.urls import path, include
 from .views import (
-    EmailSignupView, EmailLoginView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView,
-    TransferView, NotificationListView, NotificationDetailView,
+    EmailSignupView, EmailLoginView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView, resolve_user_by_phone,
+    TransferView, NotificationListView, NotificationDetailView, PushDeviceView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView, AdminLoginView,
     admin_auth_login, admin_auth_logout, admin_change_password,
@@ -12,15 +12,20 @@ from .views import (
     admin_reconciliation_last_run, admin_reconciliation_run,
     create_payment_request, get_payment_requests, get_payment_request_detail,
     pay_payment_request, decline_payment_request, cancel_payment_request,
-    get_qr_payload, verify_qr_payload, create_split, get_split_detail, cancel_split,
+    get_qr_payload, verify_qr_payload, create_split, get_split_detail, cancel_split, add_split_participant_by_qr,
     create_dispute, list_disputes, get_dispute_detail, resolve_dispute, admin_list_disputes,
     pay_qr_payload, list_linked_providers, link_mobile_money_provider,
     mobile_money_topup, mobile_money_withdrawal, mobile_money_webhook, list_mobile_money_transactions,
     create_scheduled_transfer, list_scheduled_transfers, get_scheduled_transfer_detail,
     pause_scheduled_transfer, resume_scheduled_transfer, cancel_scheduled_transfer,
     create_merchant_account, get_merchant_account, generate_merchant_qr,
-    merchant_dashboard, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
-    admin_list_merchants, admin_approve_merchant
+    merchant_dashboard, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
+    merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant
+)
+from .approval_views import list_pending_approvals, approve_transaction, decline_transaction
+from .parental_views import (
+    link_child_account, verify_parental_link, list_child_accounts, list_parent_accounts,
+    get_child_balance, get_child_transactions, send_to_child, update_parental_permissions, revoke_parental_control
 )
 
 urlpatterns = [
@@ -38,6 +43,7 @@ urlpatterns = [
     
     # User resolution
     path('users/resolve', UserResolveView.as_view(), name='user_resolve'),
+    path('users/resolve-by-phone', resolve_user_by_phone, name='resolve_user_by_phone'),
     
     # Transfers (create transfer)
     path('transfers', TransferView.as_view(), name='transfer'),
@@ -45,6 +51,7 @@ urlpatterns = [
     # Notifications
     path('notifications', NotificationListView.as_view(), name='notification_list'),
     path('notifications/<int:id>/read', NotificationDetailView.as_view(), name='notification_read'),
+    path('notifications/device', PushDeviceView.as_view(), name='notification_device'),
     
     # Wallet
     path('wallet', WalletView.as_view(), name='wallet'),
@@ -76,6 +83,7 @@ urlpatterns = [
     path('splits', create_split, name='create_split'),
     path('splits/<int:split_id>', get_split_detail, name='get_split_detail'),
     path('splits/<int:split_id>/cancel', cancel_split, name='cancel_split'),
+    path('splits/<int:split_id>/add-participant-qr', add_split_participant_by_qr, name='add_split_participant_by_qr'),
     
     # Admin API endpoints
     path('admin/dashboard', admin_dashboard, name='admin_dashboard'),
@@ -119,13 +127,34 @@ urlpatterns = [
     path('scheduled-transfers/<int:transfer_id>/cancel', cancel_scheduled_transfer, name='cancel_scheduled_transfer'),
     
     # Merchant Accounts
+    path('merchant-plans', merchant_plans, name='merchant_plans'),
     path('merchants/create', create_merchant_account, name='create_merchant_account'),
     path('merchants/me', get_merchant_account, name='get_merchant_account'),
+    path('merchants/me/subscription', merchant_subscription, name='merchant_subscription'),
     path('merchants/me/qr', generate_merchant_qr, name='generate_merchant_qr'),
     path('merchants/me/dashboard', merchant_dashboard, name='merchant_dashboard'),
+    path('merchants/me/logs', merchant_logs, name='merchant_logs'),
+    path('merchants/me/payment-links', merchant_payment_links, name='merchant_payment_links'),
+    path('merchants/me/payment-links/<int:intent_id>/deactivate', deactivate_merchant_payment_link, name='deactivate_merchant_payment_link'),
     path('merchants/me/kyc-documents', merchant_kyc_documents, name='merchant_kyc_documents'),
     path('merchants/me/credentials', merchant_credentials, name='merchant_credentials'),
     path('merchants/me/webhook', merchant_webhook_config, name='merchant_webhook_config'),
     path('admin/merchants', admin_list_merchants, name='admin_list_merchants'),
     path('admin/merchants/<int:merchant_id>/approve', admin_approve_merchant, name='admin_approve_merchant'),
+    
+    # Transaction Approvals
+    path('approvals/pending', list_pending_approvals, name='list_pending_approvals'),
+    path('approvals/<int:approval_id>/approve', approve_transaction, name='approve_transaction'),
+    path('approvals/<int:approval_id>/decline', decline_transaction, name='decline_transaction'),
+    
+    # Parental Controls
+    path('parental/link', link_child_account, name='link_child_account'),
+    path('parental/<int:control_id>/verify', verify_parental_link, name='verify_parental_link'),
+    path('parental/children', list_child_accounts, name='list_child_accounts'),
+    path('parental/parents', list_parent_accounts, name='list_parent_accounts'),
+    path('parental/<int:child_id>/balance', get_child_balance, name='get_child_balance'),
+    path('parental/<int:child_id>/transactions', get_child_transactions, name='get_child_transactions'),
+    path('parental/<int:child_id>/send', send_to_child, name='send_to_child'),
+    path('parental/<int:control_id>/permissions', update_parental_permissions, name='update_parental_permissions'),
+    path('parental/<int:control_id>/revoke', revoke_parental_control, name='revoke_parental_control'),
 ]

@@ -15,6 +15,10 @@ from wallet.services.payment_requests import expire_payment_requests
 from wallet.services.reconciliation import reconcile_balances
 from wallet.services.transfers import run_scheduled_transfers
 from wallet.services.exchange_rates import refresh_exchange_rates
+from wallet.services.webhooks import deliver_webhook
+from wallet.models import Merchant, MerchantApiKey, MerchantMode
+import hashlib
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -223,3 +227,39 @@ def generate_transaction_export(export_id, filters=None):
     result = {'export_id': export_id, 'status': 'not_implemented'}
     _log_task_success('generate_transaction_export', result)
     return result
+
+
+@shared_task(name='wallet.tasks.generate_merchant_api_keys_task', ignore_result=True)
+def generate_merchant_api_keys_task(merchant_id):
+    """Ensure approved merchants have API key records for sandbox and live modes."""
+    merchant = Merchant.objects.get(pk=merchant_id)
+    for mode in (MerchantMode.SANDBOX, MerchantMode.LIVE):
+        key = MerchantApiKey.objects.filter(merchant=merchant, mode=mode).first()
+        if key:
+            continue
+        secret = secrets.token_urlsafe(32)
+        public_key = f'{"live" if mode == MerchantMode.LIVE else "test"}_pk_{secrets.token_urlsafe(18)}'
+        MerchantApiKey.objects.create(
+            merchant=merchant,
+            mode=mode,
+            public_key=public_key,
+            secret_key_prefix=f'{"live" if mode == MerchantMode.LIVE else "test"}_sk_',
+            secret_key_hash=hashlib.sha256(secret.encode()).hexdigest(),
+        )
+    return {'merchant_id': merchant_id, 'status': 'ready'}
+
+
+@shared_task(
+    name='wallet.tasks.deliver_webhook_task',
+    bind=True,
+    max_retries=5,
+    default_retry_delay=60,
+    ignore_result=True,
+)
+def deliver_webhook_task(self, delivery_id):
+    """Deliver a merchant webhook and retry failed deliveries."""
+    try:
+        return deliver_webhook(delivery_id)
+    except Exception as exc:
+        logger.warning('webhook_delivery_failed', extra={'delivery_id': delivery_id, 'error': str(exc)})
+        raise self.retry(exc=exc)

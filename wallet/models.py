@@ -166,6 +166,8 @@ class User(AbstractUser):
     username = models.CharField(max_length=150, unique=True, null=True, blank=True)  # Optional for OAuth, required for admin
     google_sub = models.CharField(max_length=255, unique=True, null=True, blank=True, db_index=True)  # Optional for admin users
     email = models.EmailField(unique=True)
+    phone_number = models.CharField(max_length=30, unique=True, null=True, blank=True, db_index=True)
+    primary_phone_number = models.CharField(max_length=30, unique=True, null=True, blank=True, db_index=True, help_text="Primary phone number for transfers and payments")
     handle = models.CharField(max_length=50, unique=True, db_index=True)
     display_name = models.CharField(max_length=255)
     avatar_url = models.URLField(blank=True)
@@ -189,9 +191,11 @@ class User(AbstractUser):
         decimal_places=2,
         default=Decimal('5000.00')
     )
+    limits_manually_set = models.BooleanField(default=False)
     handle_changed_at = models.DateTimeField(null=True, blank=True)
     is_agent = models.BooleanField(default=False)  # B8: Agent flag for future cash network
     must_change_password = models.BooleanField(default=False)
+    transaction_pin = models.CharField(max_length=128, null=True, blank=True, help_text="Hashed 4-digit PIN for transaction approvals")
     created_at = models.DateTimeField(auto_now_add=True)
 
     # For OAuth users, use email as USERNAME_FIELD
@@ -203,9 +207,45 @@ class User(AbstractUser):
         db_table = 'users'
 
 
+class ParentalControl(models.Model):
+    """
+    Parental control relationship between a parent and child account.
+    Parents can control child's balance, view transactions, and send money.
+    """
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        ACTIVE = 'active', 'Active'
+        REVOKED = 'revoked', 'Revoked'
+    
+    parent = models.ForeignKey(User, on_delete=models.CASCADE, related_name='child_accounts')
+    child = models.ForeignKey(User, on_delete=models.CASCADE, related_name='parent_accounts')
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    verification_code = models.CharField(max_length=6, help_text="6-digit code sent to child's device for verification")
+    code_expires_at = models.DateTimeField(help_text="When the verification code expires")
+    linked_at = models.DateTimeField(null=True, blank=True, help_text="When the parental control was successfully linked")
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Parental control permissions
+    can_view_transactions = models.BooleanField(default=True, help_text="Parent can view child's transactions")
+    can_control_balance = models.BooleanField(default=True, help_text="Parent can control child's balance")
+    can_send_money = models.BooleanField(default=True, help_text="Parent can send money to child")
+    can_set_limits = models.BooleanField(default=True, help_text="Parent can set child's spending limits")
+    
+    class Meta:
+        db_table = 'parental_controls'
+        unique_together = ['parent', 'child']
+        verbose_name = 'Parental Control'
+        verbose_name_plural = 'Parental Controls'
+
+
 class Wallet(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='wallet')
-    currency = models.CharField(max_length=3, default='USD')
+    currency = models.CharField(max_length=3, default='GNF')
+    default_provider = models.CharField(
+        max_length=20,
+        default='orange_money',
+        help_text="Default mobile money provider for this wallet (orange_money, mtn_momo, airtel_money)"
+    )
     status = models.CharField(
         max_length=20,
         choices=WalletStatus.choices,
@@ -388,6 +428,19 @@ class Notification(models.Model):
     class Meta:
         db_table = 'notifications'
         ordering = ['-created_at']
+
+
+class PushDevice(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='push_devices')
+    token = models.CharField(max_length=512, unique=True)
+    platform = models.CharField(max_length=20, blank=True, default='')
+    active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'push_devices'
+        ordering = ['-last_seen_at']
 
 
 class SystemSetting(models.Model):
@@ -734,9 +787,45 @@ class MerchantStatus(models.TextChoices):
     REJECTED = 'rejected', 'Rejected'
 
 
+class FeeAppliesTo(models.TextChoices):
+    P2P_TRANSFER = 'p2p_transfer', 'P2P Transfer'
+    MERCHANT_TRANSFER = 'merchant_transfer', 'Merchant Transfer'
+
+
+class PaymentIntentStatus(models.TextChoices):
+    CREATED = 'created', 'Created'
+    PENDING_PAYMENT = 'pending_payment', 'Pending Payment'
+    SUCCEEDED = 'succeeded', 'Succeeded'
+    FAILED = 'failed', 'Failed'
+    EXPIRED = 'expired', 'Expired'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
 class MerchantMode(models.TextChoices):
     SANDBOX = 'sandbox', 'Sandbox'
     LIVE = 'live', 'Live'
+
+
+class MerchantPlan(models.Model):
+    """Commercial plan and server-side capability limits for a merchant."""
+    code = models.SlugField(max_length=30, unique=True)
+    name = models.CharField(max_length=80)
+    description = models.TextField(blank=True, default='')
+    monthly_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    currency = models.CharField(max_length=3, default='GNF')
+    monthly_transaction_limit = models.PositiveIntegerField(null=True, blank=True)
+    transaction_fee_percent = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal('0.000'))
+    api_access = models.BooleanField(default=False)
+    webhook_access = models.BooleanField(default=False)
+    qr_payments = models.BooleanField(default=True)
+    kyc_support = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'merchant_plans'
+        ordering = ['monthly_price', 'id']
 
 
 class Merchant(models.Model):
@@ -809,6 +898,125 @@ class Merchant(models.Model):
         ]
 
 
+class FeePolicy(models.Model):
+    name = models.CharField(max_length=100)
+    applies_to = models.CharField(max_length=30, choices=FeeAppliesTo.choices)
+    fee_percent = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
+    fee_fixed = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, blank=True, default='')
+    priority = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, null=True, blank=True, related_name='fee_policies')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'fee_policies'
+        ordering = ['-priority', '-created_at']
+
+
+class FeeWaiver(models.Model):
+    applies_to = models.CharField(max_length=30, choices=FeeAppliesTo.choices)
+    valid_from = models.DateTimeField()
+    valid_until = models.DateTimeField(null=True, blank=True)
+    reason = models.TextField(blank=True, default='')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='fee_waivers')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'fee_waivers'
+
+
+class PaymentIntent(models.Model):
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    description = models.TextField(blank=True, default='')
+    external_reference = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=20, choices=PaymentIntentStatus.choices, default=PaymentIntentStatus.CREATED)
+    mode = models.CharField(max_length=10, choices=MerchantMode.choices)
+    return_url = models.URLField(blank=True, default='')
+    expires_at = models.DateTimeField(default=default_payment_intent_expiry)
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='payment_intents')
+    payer = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='payment_intents')
+    resulting_transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='payment_intents')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'payment_intents'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['merchant', 'status', 'created_at']),
+            models.Index(fields=['status', 'expires_at']),
+            models.Index(fields=['external_reference']),
+        ]
+
+
+class WebhookDeliveryStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    DELIVERED = 'delivered', 'Delivered'
+    FAILED = 'failed', 'Failed'
+
+
+class WebhookDelivery(models.Model):
+    Status = WebhookDeliveryStatus
+
+    event_type = models.CharField(max_length=50)
+    target_url = models.URLField()
+    payload = models.JSONField()
+    status = models.CharField(max_length=20, choices=WebhookDeliveryStatus.choices, default=WebhookDeliveryStatus.PENDING)
+    status_code = models.IntegerField(null=True, blank=True)
+    attempt_count = models.IntegerField(default=0)
+    last_error = models.TextField(blank=True, default='')
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='webhook_deliveries')
+    payment_intent = models.ForeignKey(PaymentIntent, on_delete=models.CASCADE, related_name='webhook_deliveries')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'webhook_deliveries'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['merchant', 'status', 'created_at']),
+            models.Index(fields=['payment_intent', 'event_type']),
+        ]
+
+
+class MerchantApiKey(models.Model):
+    mode = models.CharField(max_length=10, choices=MerchantMode.choices)
+    public_key = models.CharField(max_length=80, unique=True, db_index=True)
+    secret_key_prefix = models.CharField(max_length=20, db_index=True)
+    secret_key_hash = models.CharField(max_length=128)
+    is_active = models.BooleanField(default=True)
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='api_keys')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'merchant_api_keys'
+        unique_together = [('merchant', 'mode')]
+        indexes = [models.Index(fields=['secret_key_prefix', 'is_active'])]
+
+
+class MerchantSubscription(models.Model):
+    """The current plan selection and billing period for a merchant."""
+    class Status(models.TextChoices):
+        TRIALING = 'trialing', 'Trialing'
+        ACTIVE = 'active', 'Active'
+        PAST_DUE = 'past_due', 'Past due'
+        CANCELED = 'canceled', 'Canceled'
+
+    merchant = models.OneToOneField(Merchant, on_delete=models.CASCADE, related_name='subscription')
+    plan = models.ForeignKey(MerchantPlan, on_delete=models.PROTECT, related_name='subscriptions')
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.TRIALING)
+    current_period_start = models.DateTimeField()
+    current_period_end = models.DateTimeField()
+    cancel_at_period_end = models.BooleanField(default=False)
+    provider_reference = models.CharField(max_length=120, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'merchant_subscriptions'
+
+
 class KYCDocument(models.Model):
     class DocumentType(models.TextChoices):
         REGISTRATION = 'registration', 'Business registration'
@@ -856,3 +1064,73 @@ class Settlement(models.Model):
     class Meta:
         db_table = 'wallet_settlements'
         ordering = ['-created_at']
+
+
+class TransactionApproval(models.Model):
+    """
+    Model for transaction approval requests.
+    When users send money, request money, or split bills, recipients can receive approval prompts.
+    """
+    class ApprovalStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        DECLINED = 'declined', 'Declined'
+        EXPIRED = 'expired', 'Expired'
+
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.CASCADE,
+        related_name='approval_requests',
+        null=True,
+        blank=True
+    )
+    payment_request = models.ForeignKey(
+        PaymentRequest,
+        on_delete=models.CASCADE,
+        related_name='approval_requests',
+        null=True,
+        blank=True
+    )
+    split_request = models.ForeignKey(
+        SplitRequest,
+        on_delete=models.CASCADE,
+        related_name='approval_requests',
+        null=True,
+        blank=True
+    )
+    approver = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='incoming_approvals'
+    )
+    requester = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='outgoing_approvals'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.PENDING
+    )
+    approval_type = models.CharField(
+        max_length=50,
+        help_text="Type of approval: money_received, payment_request, split_bill"
+    )
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    note = models.TextField(blank=True, default='')
+    expires_at = models.DateTimeField(default=default_request_expiry)
+    responded_at = models.DateTimeField(null=True, blank=True)
+    webhook_delivered = models.BooleanField(default=False)
+    webhook_delivery_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'transaction_approvals'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['approver', 'status', 'created_at']),
+            models.Index(fields=['requester', 'status', 'created_at']),
+            models.Index(fields=['status', 'expires_at']),
+        ]

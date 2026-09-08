@@ -6,7 +6,7 @@ from .models import (
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant,
-    LinkedProvider, ExchangeRate, Dispute, DisputeStatus, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, SystemSetting, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus
+    LinkedProvider, ExchangeRate, Dispute, DisputeStatus, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, SystemSetting, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, TransactionApproval, ParentalControl
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -16,11 +16,15 @@ from decimal import Decimal
 class UserSerializer(serializers.ModelSerializer):
     is_staff = serializers.BooleanField(read_only=True)
     must_change_password = serializers.BooleanField(read_only=True)
+    has_transaction_pin = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff', 'must_change_password']
+        fields = ['id', 'email', 'phone_number', 'primary_phone_number', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff', 'must_change_password', 'has_transaction_pin']
         read_only_fields = ['id', 'kyc_tier', 'status', 'is_staff', 'must_change_password']
+
+    def get_has_transaction_pin(self, obj):
+        return bool(obj.transaction_pin)
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -28,8 +32,8 @@ class WalletSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Wallet
-        fields = ['id', 'currency', 'status', 'balance']
-        read_only_fields = ['id', 'currency', 'status', 'balance']
+        fields = ['id', 'currency', 'default_provider', 'status', 'balance']
+        read_only_fields = ['id', 'currency', 'default_provider', 'status', 'balance']
 
     def get_balance(self, obj):
         return str(obj.get_balance())
@@ -44,6 +48,9 @@ class EmailSignupSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=8)
     display_name = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=30)
+    primary_phone_number = serializers.CharField(required=False, allow_blank=True, max_length=30)
+    transaction_pin = serializers.RegexField(regex=r'^\d{4}$', write_only=True, required=True, help_text="4-digit PIN for transaction approvals")
 
 
 class EmailLoginSerializer(serializers.Serializer):
@@ -61,11 +68,12 @@ class UserResolveSerializer(serializers.Serializer):
     user_id = serializers.UUIDField()
     handle = serializers.CharField()
     display_name = serializers.CharField()
+    phone_number = serializers.CharField(allow_blank=True, required=False)
     avatar_url = serializers.URLField(allow_blank=True)
 
 
 class TransferRequestSerializer(serializers.Serializer):
-    recipient_handle = serializers.CharField(required=True, max_length=50)
+    recipient_phone = serializers.CharField(required=True, max_length=30, help_text="Recipient's phone number")
     amount = serializers.DecimalField(required=True, max_digits=20, decimal_places=2)
     currency = serializers.CharField(required=True, max_length=3)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
@@ -89,18 +97,6 @@ class TransferResponseSerializer(serializers.Serializer):
     created_at = serializers.DateTimeField()
 
 
-class PaymentRequestCreateSerializer(serializers.Serializer):
-    payer_handle = serializers.CharField(max_length=50)
-    amount = serializers.DecimalField(max_digits=20, decimal_places=2)
-    currency = serializers.CharField(max_length=3)
-    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
-
-    def validate_amount(self, value):
-        if value <= 0:
-            raise serializers.ValidationError('Amount must be greater than zero.')
-        return value
-
-
 class PaymentRequestSerializer(serializers.ModelSerializer):
     requester_handle = serializers.CharField(source='requester.handle', read_only=True)
     payer_handle = serializers.CharField(source='payer.handle', read_only=True)
@@ -112,9 +108,9 @@ class PaymentRequestSerializer(serializers.ModelSerializer):
 
 
 class PaymentRequestCreateSerializer(serializers.Serializer):
-    payer_handle = serializers.CharField(max_length=50)
+    payer_phone = serializers.CharField(max_length=30, help_text="Payer's phone number")
     amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=Decimal('0.01'))
-    currency = serializers.CharField(max_length=3, default='USD')
+    currency = serializers.CharField(max_length=3, default='GNF')
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
 
@@ -123,14 +119,17 @@ class SplitCreateSerializer(serializers.Serializer):
     currency = serializers.CharField(max_length=3)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
     participants = serializers.ListField(
-        child=serializers.DictField(child=serializers.CharField()),
-        min_length=1
+        child=serializers.DictField(),
+        min_length=1,
+        help_text="List of participants with phone and amount fields"
     )
 
-    total_amount = serializers.DecimalField(max_digits=20, decimal_places=2)
-    currency = serializers.CharField(max_length=3)
-    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
-    participants = serializers.ListField(child=serializers.DictField(), min_length=1)
+    def validate_participants(self, value):
+        """Validate that each participant has phone and amount fields."""
+        for participant in value:
+            if 'phone' not in participant or 'amount' not in participant:
+                raise serializers.ValidationError("Each participant must have 'phone' and 'amount' fields")
+        return value
 
 
 class SplitSerializer(serializers.ModelSerializer):
@@ -148,6 +147,11 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = ['id', 'type', 'payload', 'read_at', 'created_at']
         read_only_fields = ['id', 'created_at']
+
+
+class PushDeviceSerializer(serializers.Serializer):
+    token = serializers.CharField(max_length=512)
+    platform = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
 
 class TransactionSerializer(serializers.ModelSerializer):
@@ -207,6 +211,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 class WalletDetailSerializer(serializers.ModelSerializer):
     balance = serializers.SerializerMethodField()
     send_limit_remaining_today = serializers.SerializerMethodField()
+    usage = serializers.SerializerMethodField()
     kyc_tier = serializers.CharField(source='user.kyc_tier', read_only=True)
     send_limit_per_tx = serializers.DecimalField(
         source='user.send_limit_per_tx', max_digits=20, decimal_places=2, read_only=True
@@ -214,12 +219,13 @@ class WalletDetailSerializer(serializers.ModelSerializer):
     send_limit_daily = serializers.DecimalField(
         source='user.send_limit_daily', max_digits=20, decimal_places=2, read_only=True
     )
+    limits_manually_set = serializers.BooleanField(source='user.limits_manually_set', read_only=True)
 
     class Meta:
         model = Wallet
         fields = [
             'id', 'balance', 'currency', 'status', 'kyc_tier', 'send_limit_per_tx',
-            'send_limit_daily', 'send_limit_remaining_today'
+            'send_limit_daily', 'send_limit_remaining_today', 'limits_manually_set', 'usage'
         ]
         read_only_fields = fields
 
@@ -227,26 +233,34 @@ class WalletDetailSerializer(serializers.ModelSerializer):
         return str(obj.get_balance())
 
     def get_send_limit_remaining_today(self, obj):
-        from django.db.models import Sum
-        from django.utils import timezone
-        from datetime import timedelta
+        from wallet.services.limits import get_daily_remaining
         
-        user = obj.user
-        twenty_four_hours_ago = timezone.now() - timedelta(days=1)
-        
-        # Sum all outgoing transactions in the last 24 hours
-        sent_amount = user.sent_transactions.filter(
-            created_at__gte=twenty_four_hours_ago,
-            status='completed'
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-        
-        remaining = user.send_limit_daily - sent_amount
-        return str(max(remaining, Decimal('0.00')))
+        # Use the new function that auto-resets at midnight in business timezone
+        remaining = get_daily_remaining(obj.user)
+        return str(remaining)
+
+    def get_usage(self, obj):
+        from wallet.services.limits import compute_limit_snapshot
+        snapshot = compute_limit_snapshot(obj.user)
+        return {
+            'completed_transfers': snapshot['completed_transfers'],
+            'volume_sent': str(snapshot['volume_sent']),
+            'current_step': snapshot['current_step'],
+            'max_steps': snapshot['max_steps'],
+            'transfers_per_step': snapshot['transfers_per_step'],
+            'transfers_until_next_increase': snapshot['transfers_until_next_increase'],
+            'per_tx_increase': str(snapshot['per_tx_increase']),
+            'daily_increase': str(snapshot['daily_increase']),
+            'next_send_limit_per_tx': str(snapshot['next_send_limit_per_tx']),
+            'next_send_limit_daily': str(snapshot['next_send_limit_daily']),
+        }
 
 
 class ProfileUpdateSerializer(serializers.Serializer):
     display_name = serializers.CharField(required=False, allow_blank=True, max_length=255)
     handle = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    primary_phone_number = serializers.CharField(required=False, allow_blank=True, max_length=30)
+    transaction_pin = serializers.RegexField(regex=r'^\d{4}$', required=False)
 
 
 def generate_unique_handle(base_handle):
@@ -469,7 +483,7 @@ class AdminUserUpdateSerializer(serializers.Serializer):
 class AdminTopUpSerializer(serializers.Serializer):
     """Serializer for admin wallet top-ups."""
     amount = serializers.DecimalField(required=True, max_digits=20, decimal_places=2, min_value=Decimal('0.01'))
-    currency = serializers.CharField(required=False, max_length=3, default='USD')
+    currency = serializers.CharField(required=False, max_length=3, default='GNF')
     note = serializers.CharField(required=False, allow_blank=True, max_length=500, default='')
     reason = serializers.CharField(required=True, max_length=500)
 
@@ -614,6 +628,7 @@ class MerchantSerializer(serializers.ModelSerializer):
     """
     user_handle = serializers.CharField(source='user.handle', read_only=True)
     wallet_currency = serializers.CharField(source='wallet.currency', read_only=True)
+    plan = serializers.SerializerMethodField()
 
     class Meta:
         model = Merchant
@@ -623,10 +638,40 @@ class MerchantSerializer(serializers.ModelSerializer):
             'static_qr_code', 'static_qr_payload', 'static_qr_signature',
             'wallet', 'wallet_currency', 'logo_url', 'contact_email', 'contact_phone',
             'address', 'tax_id', 'approved_by', 'approved_at', 'rejection_reason',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'plan', 'website_url', 'business_email',
+            'sandbox_public_key', 'live_public_key', 'credentials_issued_at'
         ]
         read_only_fields = ['id', 'user', 'static_qr_code', 'static_qr_payload', 'static_qr_signature',
-                           'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at']
+                           'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at',
+                           'sandbox_public_key', 'live_public_key', 'credentials_issued_at']
+
+    def get_plan(self, obj):
+        subscription = getattr(obj, 'subscription', None)
+        if not subscription:
+            return None
+        return MerchantPlanSerializer(subscription.plan).data | {
+            'status': subscription.status,
+            'current_period_end': subscription.current_period_end,
+            'cancel_at_period_end': subscription.cancel_at_period_end,
+        }
+
+
+class MerchantPlanSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MerchantPlan
+        fields = [
+            'code', 'name', 'description', 'monthly_price', 'currency',
+            'monthly_transaction_limit', 'transaction_fee_percent',
+            'api_access', 'webhook_access', 'qr_payments', 'kyc_support',
+        ]
+
+
+class MerchantSubscriptionSerializer(serializers.ModelSerializer):
+    plan = MerchantPlanSerializer(read_only=True)
+
+    class Meta:
+        model = MerchantSubscription
+        fields = ['status', 'plan', 'current_period_start', 'current_period_end', 'cancel_at_period_end']
 
 
 class MerchantCreateSerializer(serializers.Serializer):
@@ -642,6 +687,7 @@ class MerchantCreateSerializer(serializers.Serializer):
     contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
     address = serializers.CharField(required=False, allow_blank=True, max_length=500)
     tax_id = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    plan_code = serializers.SlugField(required=False, default='starter', max_length=30)
 
 
 class MerchantApprovalSerializer(serializers.Serializer):
@@ -650,3 +696,75 @@ class MerchantApprovalSerializer(serializers.Serializer):
     """
     action = serializers.ChoiceField(choices=['approve', 'reject'], required=True)
     rejection_reason = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class TransactionApprovalSerializer(serializers.ModelSerializer):
+    """
+    Serializer for transaction approval requests.
+    """
+    requester_handle = serializers.CharField(source='requester.handle', read_only=True)
+    requester_display_name = serializers.CharField(source='requester.display_name', read_only=True)
+    requester_phone = serializers.CharField(source='requester.primary_phone_number', read_only=True)
+    approver_handle = serializers.CharField(source='approver.handle', read_only=True)
+    approver_display_name = serializers.CharField(source='approver.display_name', read_only=True)
+    
+    class Meta:
+        model = TransactionApproval
+        fields = [
+            'id', 'approval_type', 'status', 'amount', 'currency', 'note',
+            'requester_handle', 'requester_display_name', 'requester_phone',
+            'approver_handle', 'approver_display_name',
+            'transaction_id', 'payment_request_id', 'split_request_id',
+            'expires_at', 'created_at'
+        ]
+        read_only_fields = fields
+
+
+class ParentalControlSerializer(serializers.ModelSerializer):
+    """
+    Serializer for parental control relationships.
+    """
+    parent_email = serializers.EmailField(source='parent.email', read_only=True)
+    parent_display_name = serializers.CharField(source='parent.display_name', read_only=True)
+    child_email = serializers.EmailField(source='child.email', read_only=True)
+    child_display_name = serializers.CharField(source='child.display_name', read_only=True)
+    
+    class Meta:
+        model = ParentalControl
+        fields = [
+            'id', 'parent_email', 'parent_display_name', 'child_email', 'child_display_name',
+            'status', 'can_view_transactions', 'can_control_balance', 'can_send_money', 'can_set_limits',
+            'linked_at', 'created_at'
+        ]
+        read_only_fields = fields
+
+
+class ParentalControlLinkSerializer(serializers.Serializer):
+    """
+    Serializer for linking a child account with a verification code.
+    """
+    child_phone = serializers.CharField(max_length=30, help_text="Child's phone number")
+
+
+class ParentalControlVerifySerializer(serializers.Serializer):
+    """
+    Serializer for verifying a parental control link with a code.
+    """
+    verification_code = serializers.RegexField(regex=r'^\d{6}$', help_text="6-digit verification code")
+
+
+class ParentalControlUpdateSerializer(serializers.Serializer):
+    """
+    Serializer for updating parental control permissions.
+    """
+    can_view_transactions = serializers.BooleanField(required=False)
+    can_control_balance = serializers.BooleanField(required=False)
+    can_send_money = serializers.BooleanField(required=False)
+    can_set_limits = serializers.BooleanField(required=False)
+
+
+class PinVerifySerializer(serializers.Serializer):
+    """
+    Serializer for PIN verification.
+    """
+    pin = serializers.RegexField(regex=r'^\d{4}$', help_text="4-digit transaction PIN")

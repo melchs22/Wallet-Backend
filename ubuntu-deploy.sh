@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Run on Ubuntu 22.04/24.04 as a sudo-capable user.
-APP_DIR="${APP_DIR:-/opt/wallet-backend}"
+APP_DIR="${APP_DIR:-/var/www/backend}"
 APP_USER="${APP_USER:-wallet}"
 DB_NAME="${DB_NAME:-walletmvp}"
 DB_USER="${DB_USER:-walletapp}"

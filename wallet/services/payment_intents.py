@@ -50,6 +50,14 @@ def create_payment_intent(merchant, *, amount, currency, external_reference='', 
     if merchant.status != MerchantStatus.ACTIVE:
         raise PaymentIntentError('merchant_not_active', 'Merchant account is not active')
 
+    subscription = getattr(merchant, 'subscription', None)
+    if subscription and subscription.current_period_end <= timezone.now():
+        raise PaymentIntentError('billing_period_expired', 'Your merchant billing period has expired')
+    if subscription and subscription.plan.monthly_transaction_limit is not None:
+        used = merchant.payment_intents.filter(created_at__gte=subscription.current_period_start).count()
+        if used >= subscription.plan.monthly_transaction_limit:
+            raise PaymentIntentError('plan_limit_reached', 'Your monthly payment-intent limit has been reached')
+
     intent = PaymentIntent.objects.create(
         merchant=merchant,
         amount=amount,

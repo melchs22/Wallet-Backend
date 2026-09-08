@@ -22,14 +22,6 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt
           .venv/bin/python manage.py check
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Web validation
-        working-directory: dsd-wallet
-        run: |
-          npm ci
-          npm run build
 
   deploy:
     needs: validate
@@ -62,7 +54,6 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           APP_DIR: ${{ secrets.APP_DIR }}
-          FRONTEND_DIR: ${{ secrets.FRONTEND_DIR }}
         run: |
           ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
-            "APP_DIR='$APP_DIR' FRONTEND_DIR='$FRONTEND_DIR' bash '$APP_DIR/server-deploy.sh'"
+            "APP_DIR='$APP_DIR' bash '$APP_DIR/server-deploy.sh'"

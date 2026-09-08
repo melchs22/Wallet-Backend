@@ -4,6 +4,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 from django.contrib.auth import logout, login, authenticate
+from django.contrib.auth.hashers import make_password
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.db import transaction
 from django.db.models import Q
@@ -25,13 +26,13 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
-    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, KYCDocument, Settlement
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
     EmailSignupSerializer, EmailLoginSerializer,
     UserResolveSerializer, TransferRequestSerializer, TransferResponseSerializer,
-    NotificationSerializer, TransactionSerializer, WalletDetailSerializer,
+    NotificationSerializer, PushDeviceSerializer, TransactionSerializer, WalletDetailSerializer,
     ProfileUpdateSerializer, generate_unique_handle, TransactionDetailSerializer,
     ReversalRequestSerializer, ReversalResponseSerializer, TransferAttemptSerializer,
     AdminLoginSerializer, AdminChangePasswordSerializer, AdminDashboardSerializer,
@@ -41,13 +42,15 @@ from .serializers import (
     SplitCreateSerializer, DisputeCreateSerializer, DisputeSerializer, DisputeResolveSerializer,
     MobileMoneyTransactionSerializer, MobileMoneyTopupSerializer, MobileMoneyWithdrawalSerializer,
     ScheduledTransferSerializer, ScheduledTransferCreateSerializer,
-    MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer
+    MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer,
+    MerchantPlanSerializer, MerchantSubscriptionSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
 from datetime import timedelta
 import uuid
 import secrets
+from django.core.files.storage import default_storage
 from django.db import models
 from django.db.models import Sum, Q
 from django.core.exceptions import ValidationError
@@ -73,7 +76,55 @@ def verify_qr_signature(payload_json, signature):
     return hmac.compare_digest(signature, expected_signature)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def merchant_plans(request):
+    """Return active plans for the public pricing page."""
+    return Response(MerchantPlanSerializer(MerchantPlan.objects.filter(is_active=True), many=True).data)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def merchant_subscription(request):
+    """Read or change the authenticated merchant's plan selection."""
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'POST':
+        plan_code = request.data.get('plan_code', 'starter')
+        plan = MerchantPlan.objects.filter(code=plan_code, is_active=True).first()
+        if not plan:
+            return Response({'error': 'Plan not found'}, status=status.HTTP_400_BAD_REQUEST)
+        now = timezone.now()
+        subscription, _ = MerchantSubscription.objects.update_or_create(
+            merchant=merchant,
+            defaults={
+                'plan': plan,
+                'status': MerchantSubscription.Status.ACTIVE if plan.monthly_price else MerchantSubscription.Status.TRIALING,
+                'current_period_start': now,
+                'current_period_end': now + timedelta(days=30),
+                'cancel_at_period_end': False,
+            },
+        )
+        return Response(MerchantSubscriptionSerializer(subscription).data)
+
+    subscription = getattr(merchant, 'subscription', None)
+    if not subscription:
+        return Response({'error': 'Subscription not configured'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(MerchantSubscriptionSerializer(subscription).data)
+
+
+def merchant_monthly_usage(merchant):
+    """Return the current period's payment-intent count and configured limit."""
+    subscription = getattr(merchant, 'subscription', None)
+    if not subscription:
+        return {'used': 0, 'limit': None, 'remaining': None}
+    used = merchant.payment_intents.filter(created_at__gte=subscription.current_period_start).count()
+    limit = subscription.plan.monthly_transaction_limit
+    return {'used': used, 'limit': limit, 'remaining': max(limit - used, 0) if limit is not None else None}
+
+
 @extend_schema(
     request=EmailSignupSerializer,
     responses={201: dict, 400: dict, 409: dict},
@@ -91,6 +142,9 @@ class EmailSignupView(APIView):
         email = serializer.validated_data['email'].strip().lower()
         password = serializer.validated_data['password']
         display_name = (serializer.validated_data.get('display_name') or email.split('@')[0]).strip()
+        phone_number = serializer.validated_data.get('phone_number', '').strip()
+        primary_phone_number = serializer.validated_data.get('primary_phone_number', phone_number).strip()
+        transaction_pin = serializer.validated_data.get('transaction_pin', '').strip()
 
         if User.objects.filter(email__iexact=email).exists():
             return Response({'error': 'An account with this email already exists.'}, status=status.HTTP_409_CONFLICT)
@@ -103,16 +157,24 @@ class EmailSignupView(APIView):
                 password=password,
                 handle=handle,
                 display_name=display_name,
+                phone_number=phone_number if phone_number else None,
+                primary_phone_number=primary_phone_number if primary_phone_number else None,
                 kyc_tier=KYCTier.TIER_0,
                 status=UserStatus.ACTIVE,
             )
-            wallet = Wallet.objects.create(user=user, currency='USD')
+            # Set transaction PIN
+            if transaction_pin:
+                user.transaction_pin = make_password(transaction_pin)
+                user.save()
+            wallet = Wallet.objects.create(user=user, currency='GNF', default_provider='orange_money')
             LedgerEntry.objects.create(
                 wallet=wallet,
                 transaction=None,
                 direction=LedgerDirection.CREDIT,
                 amount=Decimal('0.00'),
             )
+            from wallet.services.limits import apply_usage_based_limits
+            apply_usage_based_limits(user)
             AuditLog.objects.create(
                 user=user,
                 action='signup',
@@ -158,7 +220,7 @@ class EmailLoginView(APIView):
         login(request, user)
         wallet = getattr(user, 'wallet', None)
         if wallet is None:
-            wallet = Wallet.objects.create(user=user, currency='USD')
+            wallet = Wallet.objects.create(user=user, currency='GNF')
             LedgerEntry.objects.create(
                 wallet=wallet,
                 transaction=None,
@@ -299,8 +361,8 @@ class GoogleAuthView(APIView):
                         status=UserStatus.ACTIVE
                     )
                     
-                    # Create wallet
-                    wallet = Wallet.objects.create(user=user, currency='USD')
+                    # Create wallet with default Orange Money provider
+                    wallet = Wallet.objects.create(user=user, currency='GNF', default_provider='orange_money')
                     
                     # Create zero-balance ledger entry
                     LedgerEntry.objects.create(
@@ -309,6 +371,8 @@ class GoogleAuthView(APIView):
                         direction=LedgerDirection.CREDIT,
                         amount=Decimal('0.00')
                     )
+                    from wallet.services.limits import apply_usage_based_limits
+                    apply_usage_based_limits(user)
                     
                     # Audit log for signup
                     AuditLog.objects.create(
@@ -486,7 +550,7 @@ def admin_auth_login(request):
 
     wallet = getattr(user, 'wallet', None)
     if wallet is None:
-        wallet = Wallet.objects.create(user=user, currency='USD', status=WalletStatus.ACTIVE)
+        wallet = Wallet.objects.create(user=user, currency='GNF', status=WalletStatus.ACTIVE)
         LedgerEntry.objects.create(wallet=wallet, transaction=None, direction=LedgerDirection.CREDIT, amount=Decimal('0.00'))
 
     response_data = {
@@ -565,6 +629,8 @@ class MeView(APIView):
         Get the current user's profile and wallet summary.
         """
         user = request.user
+        from wallet.services.limits import apply_usage_based_limits
+        apply_usage_based_limits(user)
         wallet = user.wallet
         
         response_data = {
@@ -586,6 +652,8 @@ class MeView(APIView):
         user = request.user
         display_name = serializer.validated_data.get('display_name')
         handle = serializer.validated_data.get('handle')
+        primary_phone_number = serializer.validated_data.get('primary_phone_number')
+        transaction_pin = serializer.validated_data.get('transaction_pin')
 
         try:
             with transaction.atomic():
@@ -612,13 +680,25 @@ class MeView(APIView):
                     user.handle = handle
                     user.handle_changed_at = timezone.now()
                 
+                if primary_phone_number:
+                    # Check if phone number is already taken
+                    if User.objects.filter(primary_phone_number=primary_phone_number).exclude(id=user.id).exists():
+                        return Response(
+                            {'error': 'Phone number already in use'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    user.primary_phone_number = primary_phone_number
+                
+                if transaction_pin:
+                    user.transaction_pin = make_password(transaction_pin)
+                
                 user.save()
                 
                 # Audit log
                 AuditLog.objects.create(
                     user=user,
                     action='profile_update',
-                    metadata={'display_name': display_name, 'handle': handle}
+                    metadata={'display_name': display_name, 'handle': handle, 'primary_phone_number': primary_phone_number, 'transaction_pin_set': bool(transaction_pin)}
                 )
             
             return Response(
@@ -639,7 +719,7 @@ class MeView(APIView):
 )
 class UserResolveView(APIView):
     """
-    Resolve a user by handle or email.
+    Resolve a user by handle, email, or phone number.
     Returns the same generic 404 for both "not found" and "inactive account" to prevent enumeration.
     """
     permission_classes = [IsAuthenticated]
@@ -655,9 +735,9 @@ class UserResolveView(APIView):
             )
         
         try:
-            # Try to find by handle or email
+            # Try to find by handle, email, or phone number
             user = User.objects.filter(
-                models.Q(handle=query) | models.Q(email=query),
+                models.Q(handle=query) | models.Q(email=query) | models.Q(primary_phone_number=query),
                 status=UserStatus.ACTIVE
             ).first()
             
@@ -671,7 +751,8 @@ class UserResolveView(APIView):
                 'user_id': str(user.id),
                 'handle': user.handle,
                 'display_name': user.display_name,
-                'avatar_url': user.avatar_url
+                'avatar_url': user.avatar_url,
+                'primary_phone_number': user.primary_phone_number
             }
             
             return Response(response_data, status=status.HTTP_200_OK)
@@ -681,6 +762,56 @@ class UserResolveView(APIView):
                 {'error': 'An error occurred'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+@extend_schema(
+    responses={200: dict, 404: dict},
+    tags=['User']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def resolve_user_by_phone(request):
+    """
+    Resolve a user by phone number specifically.
+    Returns user details when a phone number is entered in the transfer/request forms.
+    """
+    phone_number = request.query_params.get('phone_number', '').strip()
+    
+    if not phone_number:
+        return Response(
+            {'error': 'phone_number parameter is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        user = User.objects.filter(
+            primary_phone_number=phone_number,
+            status=UserStatus.ACTIVE
+        ).first()
+        
+        if not user:
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        response_data = {
+            'user_id': str(user.id),
+            'handle': user.handle,
+            'display_name': user.display_name,
+            'avatar_url': user.avatar_url,
+            'primary_phone_number': user.primary_phone_number,
+            'wallet_currency': user.wallet.currency,
+            'wallet_provider': user.wallet.default_provider
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response(
+            {'error': 'An error occurred'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 def create_notification(user, notification_type, payload):
@@ -702,6 +833,33 @@ def create_notification(user, notification_type, payload):
     return notification
 
 
+class PushDeviceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = PushDeviceSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        from .models import PushDevice
+        device, _ = PushDevice.objects.update_or_create(
+            token=serializer.validated_data['token'],
+            defaults={
+                'user': request.user,
+                'platform': serializer.validated_data.get('platform', ''),
+                'active': True,
+            },
+        )
+        return Response({'id': device.id, 'registered': True}, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        token = request.data.get('token')
+        if token:
+            from .models import PushDevice
+            PushDevice.objects.filter(user=request.user, token=token).update(active=False)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 @extend_schema(
     request=TransferRequestSerializer,
     responses={200: TransferResponseSerializer, 400: dict},
@@ -720,20 +878,22 @@ class TransferView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        recipient_handle = serializer.validated_data['recipient_handle']
+        recipient_phone = serializer.validated_data['recipient_phone']
         amount = serializer.validated_data['amount']
         currency = serializer.validated_data['currency']
         note = serializer.validated_data.get('note', '')
         idempotency_key = serializer.validated_data['idempotency_key']
 
         sender = request.user
+        from wallet.services.limits import apply_usage_based_limits
+        apply_usage_based_limits(sender)
         sender_wallet = sender.wallet
 
         # A4: Check sender account status
         if sender.status != UserStatus.ACTIVE:
             TransferAttempt.objects.create(
                 user=sender,
-                recipient_handle_input=recipient_handle,
+                recipient_handle_input=recipient_phone,
                 amount=amount,
                 currency=currency,
                 rejection_reason='sender_account_suspended'
@@ -743,7 +903,7 @@ class TransferView(APIView):
                     'event': 'transfer_attempt_rejected',
                     'user_id': str(sender.id),
                     'reason': 'sender_account_suspended',
-                    'recipient_handle': recipient_handle,
+                    'recipient_phone': recipient_phone,
                     'amount': str(amount),
                     'timestamp': timezone.now().isoformat()
                 })
@@ -757,7 +917,7 @@ class TransferView(APIView):
         if sender_wallet.status != WalletStatus.ACTIVE:
             TransferAttempt.objects.create(
                 user=sender,
-                recipient_handle_input=recipient_handle,
+                recipient_handle_input=recipient_phone,
                 amount=amount,
                 currency=currency,
                 rejection_reason='sender_wallet_frozen'
@@ -767,7 +927,7 @@ class TransferView(APIView):
                     'event': 'transfer_attempt_rejected',
                     'user_id': str(sender.id),
                     'reason': 'sender_wallet_frozen',
-                    'recipient_handle': recipient_handle,
+                    'recipient_phone': recipient_phone,
                     'amount': str(amount),
                     'timestamp': timezone.now().isoformat()
                 })
@@ -781,7 +941,7 @@ class TransferView(APIView):
         if sender_wallet.currency != currency:
             TransferAttempt.objects.create(
                 user=sender,
-                recipient_handle_input=recipient_handle,
+                recipient_handle_input=recipient_phone,
                 amount=amount,
                 currency=currency,
                 rejection_reason='currency_mismatch'
@@ -820,17 +980,17 @@ class TransferView(APIView):
                             status=status.HTTP_400_BAD_REQUEST
                         )
                 
-                # Resolve recipient
+                # Resolve recipient by phone number
                 try:
                     recipient = User.objects.get(
-                        handle=recipient_handle,
+                        primary_phone_number=recipient_phone,
                         status=UserStatus.ACTIVE
                     )
                 except User.DoesNotExist:
                     # A2: Log failed transfer attempt
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='recipient_not_found'
@@ -840,7 +1000,7 @@ class TransferView(APIView):
                             'event': 'transfer_attempt_failed',
                             'user_id': str(sender.id),
                             'reason': 'recipient_not_found',
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'timestamp': timezone.now().isoformat()
                         })
@@ -854,7 +1014,7 @@ class TransferView(APIView):
                 if recipient.status != UserStatus.ACTIVE:
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='recipient_account_suspended'
@@ -864,7 +1024,7 @@ class TransferView(APIView):
                             'event': 'transfer_attempt_rejected',
                             'user_id': str(sender.id),
                             'reason': 'recipient_account_suspended',
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'timestamp': timezone.now().isoformat()
                         })
@@ -879,7 +1039,7 @@ class TransferView(APIView):
                 if recipient_wallet.status != WalletStatus.ACTIVE:
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='recipient_wallet_frozen'
@@ -889,7 +1049,7 @@ class TransferView(APIView):
                             'event': 'transfer_attempt_rejected',
                             'user_id': str(sender.id),
                             'reason': 'recipient_wallet_frozen',
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'timestamp': timezone.now().isoformat()
                         })
@@ -916,7 +1076,7 @@ class TransferView(APIView):
                         if not exchange_rate_obj:
                             TransferAttempt.objects.create(
                                 user=sender,
-                                recipient_handle_input=recipient_handle,
+                                recipient_handle_input=recipient_phone,
                                 amount=amount,
                                 currency=currency,
                                 rejection_reason='no_exchange_rate'
@@ -933,7 +1093,7 @@ class TransferView(APIView):
                         logger.error(f'exchange_rate_lookup_error: {str(e)}')
                         TransferAttempt.objects.create(
                             user=sender,
-                            recipient_handle_input=recipient_handle,
+                            recipient_handle_input=recipient_phone,
                             amount=amount,
                             currency=currency,
                             rejection_reason='exchange_rate_error'
@@ -947,7 +1107,7 @@ class TransferView(APIView):
                 if recipient == sender:
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='cannot_send_to_self'
@@ -965,7 +1125,7 @@ class TransferView(APIView):
                 if current_balance < amount:
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='insufficient_funds'
@@ -974,7 +1134,7 @@ class TransferView(APIView):
                         user=sender,
                         action='transfer_failed_insufficient_funds',
                         metadata={
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'balance': str(current_balance)
                         }
@@ -984,7 +1144,7 @@ class TransferView(APIView):
                             'event': 'transfer_attempt_failed',
                             'user_id': str(sender.id),
                             'reason': 'insufficient_funds',
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'balance': str(current_balance),
                             'timestamp': timezone.now().isoformat()
@@ -999,7 +1159,7 @@ class TransferView(APIView):
                 if amount > sender.send_limit_per_tx:
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='per_transaction_limit_exceeded'
@@ -1008,7 +1168,7 @@ class TransferView(APIView):
                         user=sender,
                         action='transfer_failed_limit_exceeded',
                         metadata={
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'limit': str(sender.send_limit_per_tx)
                         }
@@ -1018,7 +1178,7 @@ class TransferView(APIView):
                             'event': 'transfer_attempt_failed',
                             'user_id': str(sender.id),
                             'reason': 'per_transaction_limit_exceeded',
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'limit': str(sender.send_limit_per_tx),
                             'timestamp': timezone.now().isoformat()
@@ -1029,18 +1189,14 @@ class TransferView(APIView):
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
-                # Check daily limit
-                twenty_four_hours_ago = timezone.now() - timedelta(days=1)
-                from django.db.models import Sum
-                sent_today = sender.sent_transactions.filter(
-                    created_at__gte=twenty_four_hours_ago,
-                    status=TransactionStatus.COMPLETED
-                ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+                # Check daily limit (auto-resets at midnight)
+                from wallet.services.limits import get_daily_sent_amount
+                sent_today = get_daily_sent_amount(sender)
                 
                 if sent_today + amount > sender.send_limit_daily:
                     TransferAttempt.objects.create(
                         user=sender,
-                        recipient_handle_input=recipient_handle,
+                        recipient_handle_input=recipient_phone,
                         amount=amount,
                         currency=currency,
                         rejection_reason='daily_limit_exceeded'
@@ -1049,7 +1205,7 @@ class TransferView(APIView):
                         user=sender,
                         action='transfer_failed_daily_limit_exceeded',
                         metadata={
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'sent_today': str(sent_today),
                             'daily_limit': str(sender.send_limit_daily)
@@ -1060,7 +1216,7 @@ class TransferView(APIView):
                             'event': 'transfer_attempt_failed',
                             'user_id': str(sender.id),
                             'reason': 'daily_limit_exceeded',
-                            'recipient_handle': recipient_handle,
+                            'recipient_phone': recipient_phone,
                             'amount': str(amount),
                             'sent_today': str(sent_today),
                             'daily_limit': str(sender.send_limit_daily),
@@ -1112,7 +1268,7 @@ class TransferView(APIView):
                     action='transfer',
                     metadata={
                         'transaction_id': str(transaction_obj.id),
-                        'recipient_handle': recipient_handle,
+                        'recipient_phone': recipient_phone,
                         'amount': str(amount),
                         'currency': currency
                     }
@@ -1124,7 +1280,7 @@ class TransferView(APIView):
                         'event': 'transfer_completed',
                         'user_id': str(sender.id),
                         'transaction_id': str(transaction_obj.id),
-                        'recipient_handle': recipient_handle,
+                        'recipient_phone': recipient_phone,
                         'amount': str(amount),
                         'currency': currency,
                         'idempotency_key': idempotency_key,
@@ -1145,6 +1301,20 @@ class TransferView(APIView):
                     'transaction_id': str(transaction_obj.id)
                 }
             )
+            
+            # Create transaction approval request
+            from wallet.services.webhooks import create_transaction_approval
+            create_transaction_approval(
+                transaction=transaction_obj,
+                approver=recipient,
+                requester=sender,
+                approval_type='money_received',
+                amount=amount,
+                currency=currency,
+                note=note
+            )
+
+            apply_usage_based_limits(sender)
             
             return Response(
                 TransferResponseSerializer(transaction_obj).data,
@@ -1223,6 +1393,8 @@ class WalletView(APIView):
     serializer_class = WalletDetailSerializer
 
     def get(self, request):
+        from wallet.services.limits import apply_usage_based_limits
+        apply_usage_based_limits(request.user)
         wallet = request.user.wallet
         serializer = WalletDetailSerializer(wallet)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1521,7 +1693,7 @@ def ensure_default_system_settings():
     defaults = [
         {
             'key': 'default_currency',
-            'value': 'USD',
+            'value': 'GNF',
             'description': 'Default fiat currency for new wallet accounts.'
         },
         {
@@ -1533,6 +1705,51 @@ def ensure_default_system_settings():
             'key': 'max_single_transfer_limit',
             'value': '1000.00',
             'description': 'Default single-transfer limit.'
+        },
+        {
+            'key': 'usage_transfers_per_step',
+            'value': '5',
+            'description': 'Completed outgoing transfers required to raise sending limits by one step.'
+        },
+        {
+            'key': 'usage_volume_per_step',
+            'value': '50000.00',
+            'description': 'Completed outgoing volume that also raises sending limits by one step.'
+        },
+        {
+            'key': 'usage_per_tx_increase',
+            'value': '500.00',
+            'description': 'Amount added to the per-transaction limit for each usage step.'
+        },
+        {
+            'key': 'usage_daily_increase',
+            'value': '2500.00',
+            'description': 'Amount added to the daily sending limit for each usage step.'
+        },
+        {
+            'key': 'usage_max_steps',
+            'value': '10',
+            'description': 'Maximum number of usage-based limit increases.'
+        },
+        {
+            'key': 'kyc_tier_1_per_tx_bonus',
+            'value': '2000.00',
+            'description': 'Extra per-transaction limit granted at KYC tier 1.'
+        },
+        {
+            'key': 'kyc_tier_1_daily_bonus',
+            'value': '10000.00',
+            'description': 'Extra daily sending limit granted at KYC tier 1.'
+        },
+        {
+            'key': 'kyc_tier_2_per_tx_bonus',
+            'value': '10000.00',
+            'description': 'Extra per-transaction limit granted at KYC tier 2.'
+        },
+        {
+            'key': 'kyc_tier_2_daily_bonus',
+            'value': '50000.00',
+            'description': 'Extra daily sending limit granted at KYC tier 2.'
         },
         {
             'key': 'kyc_required_for_large_transfers',
@@ -1559,7 +1776,7 @@ def ensure_default_system_settings():
     return SystemSetting.objects.order_by('key')
 
 
-def apply_admin_topup(admin_user, target_user, amount, currency='USD', note='', reason=''):
+def apply_admin_topup(admin_user, target_user, amount, currency='GNF', note='', reason=''):
     """Create a ledger-safe top-up as admin -> target with both sides mirrored in ledger entries."""
     if amount <= 0:
         raise ValidationError('Top-up amount must be greater than zero.')
@@ -1848,7 +2065,7 @@ def admin_topup_user(request, user_id):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     amount = serializer.validated_data['amount']
-    currency = serializer.validated_data.get('currency', 'USD')
+    currency = serializer.validated_data.get('currency', 'GNF')
     note = serializer.validated_data.get('note', '')
     reason = serializer.validated_data.get('reason', '').strip()
 
@@ -1942,6 +2159,7 @@ def admin_user_update(request, user_id):
                 new_limit = serializer.validated_data['send_limit_per_tx']
                 if old_limit != new_limit:
                     user.send_limit_per_tx = new_limit
+                    user.limits_manually_set = True
                     changes['send_limit_per_tx'] = {'old': str(old_limit), 'new': str(new_limit)}
             
             if 'send_limit_daily' in serializer.validated_data:
@@ -1949,6 +2167,7 @@ def admin_user_update(request, user_id):
                 new_limit = serializer.validated_data['send_limit_daily']
                 if old_limit != new_limit:
                     user.send_limit_daily = new_limit
+                    user.limits_manually_set = True
                     changes['send_limit_daily'] = {'old': str(old_limit), 'new': str(new_limit)}
             
             # Update KYC tier
@@ -1962,6 +2181,9 @@ def admin_user_update(request, user_id):
             # Save changes
             user.save()
             wallet.save()
+            if 'kyc_tier' in changes and not user.limits_manually_set:
+                from wallet.services.limits import apply_usage_based_limits
+                apply_usage_based_limits(user)
             
             # Create audit log entry
             AuditLog.objects.create(
@@ -2334,7 +2556,7 @@ def create_payment_request(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
     requester = request.user
-    payer_handle = serializer.validated_data['payer_handle']
+    payer_phone = serializer.validated_data['payer_phone']
     amount = serializer.validated_data['amount']
     currency = serializer.validated_data['currency']
     note = serializer.validated_data.get('note', '')
@@ -2343,13 +2565,13 @@ def create_payment_request(request):
         if amount.as_tuple().exponent < -2:
             raise ValidationError('Amount cannot have more than 2 decimal places')
         
-        if requester.handle == payer_handle:
+        if requester.primary_phone_number == payer_phone:
             return Response(
                 {'error': 'You cannot request money from yourself'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        payer = User.objects.filter(handle=payer_handle, status=UserStatus.ACTIVE).first()
+        payer = User.objects.filter(primary_phone_number=payer_phone, status=UserStatus.ACTIVE).first()
         if not payer:
             return Response(
                 {'error': 'Payer not found or inactive'},
@@ -2383,6 +2605,10 @@ def create_payment_request(request):
                 'payment_request_id': payment_request.id
             }
         )
+        
+        # Create transaction approval request
+        from wallet.services.webhooks import create_payment_request_approval
+        create_payment_request_approval(payment_request)
         
         return Response(
             PaymentRequestSerializer(payment_request).data,
@@ -2522,6 +2748,8 @@ def pay_payment_request(request, request_id):
             )
         
         payer = request.user
+        from wallet.services.limits import apply_usage_based_limits
+        apply_usage_based_limits(payer)
         requester = payment_request.requester
         amount = payment_request.amount
         currency = payment_request.currency
@@ -2572,11 +2800,9 @@ def pay_payment_request(request, request_id):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            twenty_four_hours_ago = timezone.now() - timedelta(days=1)
-            sent_today = payer.sent_transactions.filter(
-                created_at__gte=twenty_four_hours_ago,
-                status=TransactionStatus.COMPLETED
-            ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            # Check daily limit (auto-resets at midnight)
+            from wallet.services.limits import get_daily_sent_amount
+            sent_today = get_daily_sent_amount(payer)
             
             if sent_today + amount > payer.send_limit_daily:
                 return Response(
@@ -2954,7 +3180,7 @@ def pay_qr_payload(request):
         transfer_serializer = TransferRequestSerializer(data={
             'recipient_handle': recipient.handle,
             'amount': amount,
-            'currency': request.data.get('currency', 'USD'),
+            'currency': request.data.get('currency', 'GNF'),
             'note': request.data.get('note') or payload.get('note', 'QR payment'),
             'idempotency_key': request.data.get('idempotency_key') or uuid.uuid4().hex,
         })
@@ -3014,7 +3240,7 @@ def create_split(request):
         data = request.data
         creator = request.user
         total_amount = Decimal(str(data.get('total_amount', '0')))
-        currency = data.get('currency', 'USD')
+        currency = data.get('currency', 'GNF')
         note = data.get('note', '')
         participants_data = data.get('participants', [])
         
@@ -3028,12 +3254,12 @@ def create_split(request):
         total_assigned = Decimal('0.00')
         
         for p in participants_data:
-            handle = str(p.get('handle', '')).strip()
+            phone = str(p.get('phone', '')).strip()
             amount_str = str(p.get('amount', '')).strip()
             
-            if not handle or not amount_str:
+            if not phone or not amount_str:
                 return Response(
-                    {'error': 'Each participant must have a handle and amount'},
+                    {'error': 'Each participant must have a phone number and amount'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
@@ -3041,18 +3267,18 @@ def create_split(request):
                 amount = Decimal(amount_str)
             except:
                 return Response(
-                    {'error': f'Invalid amount for {handle}'},
+                    {'error': f'Invalid amount for {phone}'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             if amount <= 0:
                 return Response(
-                    {'error': f'Amount for {handle} must be greater than zero'},
+                    {'error': f'Amount for {phone} must be greater than zero'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             total_assigned += amount
-            participants_list.append({'handle': handle, 'amount': amount})
+            participants_list.append({'phone': phone, 'amount': amount})
         
         if total_assigned != total_amount:
             return Response(
@@ -3070,12 +3296,12 @@ def create_split(request):
             )
             
             for p in participants_list:
-                payer_handle = p['handle']
+                payer_phone = p['phone']
                 amount_owed = p['amount']
                 
-                payer = User.objects.filter(handle=payer_handle, status=UserStatus.ACTIVE).first()
+                payer = User.objects.filter(primary_phone_number=payer_phone, status=UserStatus.ACTIVE).first()
                 if not payer:
-                    raise ValidationError(f'Payer {payer_handle} not found or inactive')
+                    raise ValidationError(f'Payer {payer_phone} not found or inactive')
                 
                 payment_request = PaymentRequest.objects.create(
                     requester=creator,
@@ -3105,6 +3331,11 @@ def create_split(request):
                         'payment_request_id': payment_request.id
                     }
                 )
+                
+                # Create transaction approval request for split participant
+                from wallet.services.webhooks import create_split_approval
+                participant_obj = split.participants.get(payment_request=payment_request)
+                create_split_approval(split, participant_obj)
         
         return Response(
             {
@@ -3117,7 +3348,7 @@ def create_split(request):
                 'created_at': split.created_at.isoformat(),
                 'participants': [
                     {
-                        'handle': p['handle'],
+                        'phone': p['phone'],
                         'amount': str(p['amount']),
                         'status': 'pending'
                     }
@@ -3263,7 +3494,9 @@ def get_split_detail(request, split_id):
                 paid_count += 1
             
             participants.append({
+                'phone': pr.payer.primary_phone_number if pr.payer else '',
                 'handle': pr.payer.handle if pr.payer else '',
+                'display_name': pr.payer.display_name if pr.payer else '',
                 'amount': str(participant.amount_owed),
                 'status': pr.status,
                 'payment_request_id': pr.id
@@ -3273,6 +3506,8 @@ def get_split_detail(request, split_id):
             {
                 'id': split.id,
                 'creator_handle': split.creator.handle,
+                'creator_display_name': split.creator.display_name,
+                'creator_phone': split.creator.primary_phone_number,
                 'total_amount': str(split.total_amount),
                 'currency': split.currency,
                 'note': split.note,
@@ -3292,6 +3527,166 @@ def get_split_detail(request, split_id):
         )
     except Exception as e:
         logger.error(f'get_split_detail_error: {str(e)}')
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@extend_schema(
+    request={'type': 'object', 'properties': {'qr_encoded': {'type': 'string'}, 'amount': {'type': 'number'}, 'note': {'type': 'string'}}},
+    responses={200: dict, 400: dict},
+    tags=['Splits']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def add_split_participant_by_qr(request, split_id):
+    """Add a participant to a split bill by scanning their QR code."""
+    try:
+        split = SplitRequest.objects.get(id=split_id)
+        
+        if request.user != split.creator:
+            return Response(
+                {'error': 'Only the creator can add participants'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if split.status != SplitRequest.SplitStatus.PENDING:
+            return Response(
+                {'error': 'Can only add participants to pending splits'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        qr_encoded = request.data.get('qr_encoded', '').strip()
+        amount = Decimal(str(request.data.get('amount', '0')))
+        note = request.data.get('note', '').strip()
+        
+        if not qr_encoded or amount <= 0:
+            return Response(
+                {'error': 'QR code and valid amount are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Decode and verify QR code
+        try:
+            import base64
+            decoded = base64.b64decode(qr_encoded).decode()
+            payload_json, signature = decoded.rsplit('|', 1)
+            
+            if not verify_qr_signature(payload_json, signature):
+                return Response(
+                    {'error': 'Invalid QR signature'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            payload = json.loads(payload_json)
+            
+            # Check expiration
+            exp = payload.get('exp')
+            if exp:
+                from datetime import datetime as dt
+                from datetime import timezone as datetime_timezone
+                exp_time = dt.fromtimestamp(exp, tz=datetime_timezone.utc)
+                if timezone.now() > exp_time:
+                    return Response(
+                        {'error': 'QR code has expired'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            
+            # Get user from QR payload
+            handle = payload.get('handle')
+            if not handle:
+                return Response(
+                    {'error': 'Invalid QR code format'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            participant_user = User.objects.get(handle=handle, status=UserStatus.ACTIVE)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Invalid QR code: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if user is already a participant
+        existing_participant = split.participants.filter(
+            payment_request__payer=participant_user
+        ).first()
+        
+        if existing_participant:
+            return Response(
+                {'error': 'User is already a participant in this split'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create payment request for the new participant
+        with transaction.atomic():
+            payment_request = PaymentRequest.objects.create(
+                requester=split.creator,
+                payer=participant_user,
+                amount=amount,
+                currency=split.currency,
+                note=f'Split payment: {note}' if note else f'Split payment: {split.note}',
+                status=PaymentRequestStatus.PENDING
+            )
+            
+            SplitParticipant.objects.create(
+                split_request=split,
+                payment_request=payment_request,
+                amount_owed=amount
+            )
+            
+            # Update split total amount
+            split.total_amount += amount
+            split.save()
+            
+            # Create notification and approval request
+            create_notification(
+                participant_user,
+                'split_request_received',
+                {
+                    'creator_handle': split.creator.handle,
+                    'creator_display_name': split.creator.display_name,
+                    'amount': str(amount),
+                    'currency': split.currency,
+                    'total_split_amount': str(split.total_amount),
+                    'split_id': split.id,
+                    'payment_request_id': payment_request.id
+                }
+            )
+            
+            from wallet.services.webhooks import create_split_approval
+            participant_obj = split.participants.get(payment_request=payment_request)
+            create_split_approval(split, participant_obj)
+        
+        return Response(
+            {
+                'message': 'Participant added successfully',
+                'participant': {
+                    'phone': participant_user.primary_phone_number,
+                    'handle': participant_user.handle,
+                    'display_name': participant_user.display_name,
+                    'amount': str(amount),
+                    'status': 'pending'
+                },
+                'updated_total': str(split.total_amount)
+            },
+            status=status.HTTP_201_CREATED
+        )
+        
+    except SplitRequest.DoesNotExist:
+        return Response(
+            {'error': 'Split not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except User.DoesNotExist:
+        return Response(
+            {'error': 'User from QR code not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f'add_split_participant_by_qr_error: {str(e)}')
         return Response(
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -4182,6 +4577,7 @@ def create_merchant_account(request):
     contact_phone = serializer.validated_data.get('contact_phone', '')
     address = serializer.validated_data.get('address', '')
     tax_id = serializer.validated_data.get('tax_id', '')
+    plan_code = serializer.validated_data.get('plan_code', 'starter')
 
     try:
         with transaction.atomic():
@@ -4200,6 +4596,10 @@ def create_merchant_account(request):
                     {'error': 'Wallet not found or does not belong to user'},
                     status=status.HTTP_404_NOT_FOUND
                 )
+
+            plan = MerchantPlan.objects.filter(code=plan_code, is_active=True).first()
+            if not plan:
+                return Response({'error': 'Plan not found'}, status=status.HTTP_400_BAD_REQUEST)
 
             # Create merchant account
             merchant = Merchant.objects.create(
@@ -4220,6 +4620,14 @@ def create_merchant_account(request):
             merchant.sandbox_secret_hash = hashlib.sha256(sandbox_secret.encode()).hexdigest()
             merchant.credentials_issued_at = timezone.now()
             merchant.save(update_fields=['sandbox_public_key', 'sandbox_secret_hash', 'credentials_issued_at'])
+            now = timezone.now()
+            MerchantSubscription.objects.create(
+                merchant=merchant,
+                plan=plan,
+                status=MerchantSubscription.Status.ACTIVE if plan.monthly_price else MerchantSubscription.Status.TRIALING,
+                current_period_start=now,
+                current_period_end=now + timedelta(days=30),
+            )
 
             # Audit log
             AuditLog.objects.create(
@@ -4245,7 +4653,7 @@ def create_merchant_account(request):
     responses={200: MerchantSerializer, 404: dict},
     tags=['Merchants']
 )
-@api_view(['GET'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
 def get_merchant_account(request):
     """
@@ -4253,6 +4661,12 @@ def get_merchant_account(request):
     """
     try:
         merchant = Merchant.objects.get(user=request.user)
+        if request.method == 'PATCH':
+            allowed_fields = ['business_name', 'business_email', 'website_url', 'business_type', 'description', 'logo_url', 'contact_email', 'contact_phone', 'address', 'tax_id']
+            for field in allowed_fields:
+                if field in request.data:
+                    setattr(merchant, field, request.data[field])
+            merchant.save(update_fields=[field for field in allowed_fields if field in request.data] + ['updated_at'])
         return Response(
             MerchantSerializer(merchant).data,
             status=status.HTTP_200_OK
@@ -4265,6 +4679,58 @@ def get_merchant_account(request):
     except Exception as e:
         logger.error(f'generate_merchant_qr_error: {str(e)}')
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def merchant_logs(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    deliveries = merchant.webhook_deliveries.select_related('payment_intent').values(
+        'id', 'event_type', 'target_url', 'status', 'status_code', 'attempt_count', 'last_error', 'created_at', 'delivered_at'
+    )[:100]
+    return Response(list(deliveries))
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def merchant_payment_links(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'POST':
+        if merchant.status != MerchantStatus.ACTIVE:
+            return Response({'error': 'Merchant account must be active to create payment links'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            amount = Decimal(str(request.data.get('amount', '0')))
+            if amount <= 0:
+                raise ValueError
+            intent = PaymentIntent.objects.create(
+                merchant=merchant,
+                amount=amount,
+                currency=str(request.data.get('currency', merchant.wallet.currency)).upper(),
+                description=str(request.data.get('description', '')),
+                mode=MerchantMode.SANDBOX,
+                status=PaymentIntentStatus.PENDING_PAYMENT,
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            return Response({'error': 'A positive amount is required'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'id': intent.id, 'type': request.data.get('type', 'link'), 'amount': str(intent.amount), 'description': intent.description, 'code': str(intent.id), 'status': 'active', 'times_paid': 0, 'total_collected': '0.00'}, status=status.HTTP_201_CREATED)
+    links = PaymentIntent.objects.filter(merchant=merchant).order_by('-created_at')[:100]
+    return Response([{'id': link.id, 'type': 'link', 'amount': str(link.amount), 'description': link.description, 'code': str(link.id), 'status': 'active' if link.status == PaymentIntentStatus.PENDING_PAYMENT else link.status, 'times_paid': 0, 'total_collected': '0.00', 'created_at': link.created_at} for link in links])
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def deactivate_merchant_payment_link(request, intent_id):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    intent = PaymentIntent.objects.filter(id=intent_id, merchant=merchant).first()
+    if not intent:
+        return Response({'error': 'Payment link not found'}, status=status.HTTP_404_NOT_FOUND)
+    intent.status = PaymentIntentStatus.CANCELLED
+    intent.save(update_fields=['status'])
+    return Response({'id': intent.id, 'status': 'cancelled'})
 
 
 @extend_schema(
@@ -4348,6 +4814,7 @@ def merchant_dashboard(request):
     return Response({'merchant': MerchantSerializer(merchant).data, 'today_volume': str(volume),
                      'transaction_count': transactions.count(), 'pending_settlements': '0.00',
                      'available_balance': str(merchant.wallet.get_balance()),
+                     'plan_usage': merchant_monthly_usage(merchant),
                      'transactions': list(transactions.values('id', 'amount', 'currency', 'note', 'status', 'created_at')[:50]),
                      'kyc_documents': list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')),
                      'settlements': list(merchant.settlements.values('id', 'amount', 'fees', 'currency', 'batch_reference', 'status', 'destination', 'created_at'))})
@@ -4360,7 +4827,15 @@ def merchant_kyc_documents(request):
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'POST':
-        document = KYCDocument.objects.create(merchant=merchant, document_type=request.data.get('document_type'), file_url=request.data.get('file_url'))
+        document_type = request.data.get('document_type')
+        uploaded_file = request.FILES.get('file')
+        file_url = request.data.get('file_url')
+        if uploaded_file:
+            stored_path = default_storage.save(f'kyc/{merchant.id}/{uploaded_file.name}', uploaded_file)
+            file_url = request.build_absolute_uri(default_storage.url(stored_path))
+        if not document_type or not file_url:
+            return Response({'error': 'document_type and file are required'}, status=status.HTTP_400_BAD_REQUEST)
+        document = KYCDocument.objects.create(merchant=merchant, document_type=document_type, file_url=file_url)
         return Response({'id': document.id, 'document_type': document.document_type, 'status': document.status, 'file_url': document.file_url}, status=status.HTTP_201_CREATED)
     return Response(list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')))
 

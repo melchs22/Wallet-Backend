@@ -1,6 +1,7 @@
 import logging
+import os
 
-from wallet.models import Notification, User
+from wallet.models import Notification, PushDevice, User
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ def deliver_notification(notification_id):
         logger.warning('deliver_notification_missing', extra={'notification_id': notification_id})
         return {'status': 'not_found'}
 
+    if notification.type.startswith(('transfer_', 'payment_request_', 'split_request_', 'wallet_')):
+        _send_push(notification)
+
     logger.info(
         'notification_delivered',
         extra={
@@ -34,6 +38,44 @@ def deliver_notification(notification_id):
         },
     )
     return {'status': 'delivered', 'notification_id': notification_id}
+
+
+def _send_push(notification):
+    """Send FCM push notifications when Firebase Admin is configured."""
+    try:
+        import firebase_admin
+        from firebase_admin import messaging
+    except ImportError:
+        logger.warning('firebase_admin_not_installed')
+        return
+
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        credential_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        if not credential_path:
+            logger.warning('firebase_credentials_not_configured')
+            return
+        firebase_admin.initialize_app()
+
+    devices = PushDevice.objects.filter(user=notification.user, active=True)
+    if not devices.exists():
+        return
+
+    payload = notification.payload or {}
+    message = messaging.MulticastMessage(
+        tokens=list(devices.values_list('token', flat=True)),
+        notification=messaging.Notification(
+            title=payload.get('title', 'DSD PAY'),
+            body=payload.get('message', 'You have a new wallet update.'),
+        ),
+        data={key: str(value) for key, value in payload.items() if value is not None},
+    )
+    response = messaging.send_each_for_multicast(message)
+    for device, result in zip(devices, response.responses):
+        if not result.success and 'registration-token-not-registered' in str(result.exception):
+            device.active = False
+            device.save(update_fields=['active'])
 
 
 def broadcast_notification(notification_type, payload, user_ids=None):

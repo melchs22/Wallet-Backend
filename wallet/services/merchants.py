@@ -82,4 +82,4 @@ def ensure_merchant_api_keys_on_activation(merchant):
 def get_merchant_wallet(merchant, mode):
     if mode == MerchantMode.SANDBOX:
         return ensure_sandbox_wallet(merchant)
-    return merchant.live_wallet
+    return merchant.wallet

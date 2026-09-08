@@ -6,7 +6,7 @@ from django.utils import timezone
 from wallet.models import FeeAppliesTo, FeePolicy, FeeWaiver, Merchant, User
 
 
-def get_platform_wallet(currency='USD', is_sandbox=False):
+def get_platform_wallet(currency='GNF', is_sandbox=False):
     from wallet.models import Wallet, WalletStatus
 
     email = 'platform-sandbox@wallet.internal' if is_sandbox else 'platform@wallet.internal'
@@ -36,7 +36,7 @@ def _has_active_waiver(user, applies_to):
     ).filter(Q(valid_until__isnull=True) | Q(valid_until__gte=now)).exists()
 
 
-def resolve_fee(amount, applies_to, *, merchant=None, user=None, currency='USD'):
+def resolve_fee(amount, applies_to, *, merchant=None, user=None, currency='GNF'):
     """
     Resolve applicable fee for a transfer. Merchant-scoped policies outrank general ones.
     Returns (fee_amount, policy_or_none).
@@ -69,7 +69,7 @@ def _calculate_fee(amount, policy):
     return fee
 
 
-def preview_merchant_transfer_fee(amount, merchant_id, currency='USD'):
+def preview_merchant_transfer_fee(amount, merchant_id, currency='GNF'):
     merchant = Merchant.objects.get(pk=merchant_id)
     fee_amount, policy = resolve_fee(
         amount,

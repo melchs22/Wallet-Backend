@@ -20,7 +20,7 @@ def get_active_currencies():
     wallet_currencies = set(
         Wallet.objects.values_list('currency', flat=True).distinct()
     )
-    extra = set(getattr(settings, 'EXCHANGE_RATE_EXTRA_CURRENCIES', ['USD', 'EUR', 'GBP']))
+    extra = set(getattr(settings, 'EXCHANGE_RATE_EXTRA_CURRENCIES', ['GNF', 'EUR', 'GBP']))
     currencies = {c.upper() for c in wallet_currencies if c} | extra
     return sorted(currencies)
 
@@ -102,8 +102,8 @@ def refresh_exchange_rates(base_currencies=None, target_currencies=None):
     bases = sorted({c.upper() for c in (base_currencies or targets)})
 
     if not bases:
-        bases = ['USD']
-        targets = ['USD', 'EUR', 'GBP']
+        bases = ['GNF']
+        targets = ['GNF', 'EUR', 'GBP']
 
     now = timezone.now()
     created_count = 0

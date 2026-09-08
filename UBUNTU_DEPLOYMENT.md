@@ -4,6 +4,25 @@ This guide deploys the Django API, PostgreSQL, Redis, Celery worker, Celery Beat
 
 The server-side commands require SSH access. They are prepared here but have not been run remotely because no SSH credentials were provided.
 
+## Fast path: one command
+
+After adding the server's SSH key and logging into Ubuntu, this single command creates `/var/www/backend` and `/var/www/frontend`, clones both GitHub repositories, installs the services, creates PostgreSQL, writes environment files, builds the frontend, configures Nginx, and starts Django/Celery/Beat/Next.js:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/melchs22/Wallet-Backend/main/server-bootstrap.sh | sudo -E bash
+```
+
+The command prompts for the PostgreSQL password and Google OAuth credentials. It generates the Django and QR secrets automatically. The script is idempotent for the repository directories and database role, but review the existing server before running it because it will reset cloned repositories to their `main` branch.
+
+For a non-interactive run from a secure shell session:
+
+```bash
+export DB_PASSWORD='use-a-strong-password'
+export GOOGLE_CLIENT_ID='your-google-client-id'
+export GOOGLE_CLIENT_SECRET='your-google-client-secret'
+curl -fsSL https://raw.githubusercontent.com/melchs22/Wallet-Backend/main/server-bootstrap.sh | sudo -E bash
+```
+
 ## 1. Server prerequisites
 
 Use Ubuntu 22.04 or 24.04 with a sudo-capable account. Point the server firewall at these ports:
@@ -17,13 +36,20 @@ sudo ufw enable
 
 Port `8000` should remain private; Nginx proxies `/api/` to Django.
 
-Upload this repository and the business frontend to the server, for example:
+The production repositories are:
+
+- Backend: `https://github.com/melchs22/Wallet-Backend.git`
+- Business frontend: `https://github.com/melchs22/dsd-wallet.git`
+
+Clone these exact repositories on the server:
 
 ```bash
-sudo mkdir -p /opt/wallet-backend /opt/dsd-wallet
-sudo chown -R "$USER":"$USER" /opt/wallet-backend /opt/dsd-wallet
-git clone YOUR_BACKEND_REPOSITORY /opt/wallet-backend
-git clone YOUR_FRONTEND_REPOSITORY /opt/dsd-wallet
+sudo mkdir -p /var/www/backend /var/www/frontend
+sudo chown -R "$USER":"$USER" /var/www/backend /var/www/frontend
+git clone https://github.com/melchs22/Wallet-Backend.git /var/www/backend
+git clone https://github.com/melchs22/dsd-wallet.git /var/www/frontend
+git -C /var/www/backend branch --show-current
+git -C /var/www/frontend branch --show-current
 ```
 
 ## 2. PostgreSQL credentials
@@ -53,7 +79,7 @@ Generate a password with `openssl rand -base64 32`. Do not commit it, paste it i
 ## 3. Python environment
 
 ```bash
-cd /opt/wallet-backend
+cd /var/www/backend
 sudo apt update
 sudo apt install -y python3-venv python3-dev build-essential libpq-dev postgresql postgresql-contrib redis-server nginx
 python3 -m venv .venv
@@ -62,7 +88,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Create `/opt/wallet-backend/.env` with mode `600`:
+Create `/var/www/backend/.env` with mode `600`:
 
 ```dotenv
 DJANGO_SETTINGS_MODULE=walletmvp.settings
@@ -88,7 +114,7 @@ CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/0
 ```
 
 ```bash
-chmod 600 /opt/wallet-backend/.env
+chmod 600 /var/www/backend/.env
 ```
 
 For Google OAuth, add `http://178.128.156.225:3000/auth/callback` as an authorized redirect URI. Google may require a verified domain for production OAuth; use a domain and HTTPS before public launch.
@@ -105,11 +131,11 @@ cd /path/to/Wallet-Backend
 Copy `backups/pre-postgres/wallet-data.json` to the server. Then on Ubuntu:
 
 ```bash
-cd /opt/wallet-backend
+cd /var/www/backend
 . .venv/bin/activate
 set -a; . ./.env; set +a
 python manage.py migrate
-python manage.py loaddata /opt/wallet-backend/backups/pre-postgres/wallet-data.json
+python manage.py loaddata /var/www/backend/backups/pre-postgres/wallet-data.json
 python manage.py collectstatic --noinput
 python manage.py check --deploy
 ```
@@ -135,9 +161,9 @@ After=network.target postgresql.service redis-server.service
 [Service]
 User=wallet
 Group=wallet
-WorkingDirectory=/opt/wallet-backend
-EnvironmentFile=/opt/wallet-backend/.env
-ExecStart=/opt/wallet-backend/.venv/bin/gunicorn walletmvp.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 120
+WorkingDirectory=/var/www/backend
+EnvironmentFile=/var/www/backend/.env
+ExecStart=/var/www/backend/.venv/bin/gunicorn walletmvp.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 120
 Restart=always
 
 [Install]
@@ -154,9 +180,9 @@ After=network.target redis-server.service postgresql.service
 [Service]
 User=wallet
 Group=wallet
-WorkingDirectory=/opt/wallet-backend
-EnvironmentFile=/opt/wallet-backend/.env
-ExecStart=/opt/wallet-backend/.venv/bin/celery -A walletmvp worker -l info --concurrency 2
+WorkingDirectory=/var/www/backend
+EnvironmentFile=/var/www/backend/.env
+ExecStart=/var/www/backend/.venv/bin/celery -A walletmvp worker -l info --concurrency 2
 Restart=always
 
 [Install]
@@ -173,9 +199,9 @@ After=network.target redis-server.service postgresql.service
 [Service]
 User=wallet
 Group=wallet
-WorkingDirectory=/opt/wallet-backend
-EnvironmentFile=/opt/wallet-backend/.env
-ExecStart=/opt/wallet-backend/.venv/bin/celery -A walletmvp beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+WorkingDirectory=/var/www/backend
+EnvironmentFile=/var/www/backend/.env
+ExecStart=/var/www/backend/.venv/bin/celery -A walletmvp beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
 Restart=always
 
 [Install]
@@ -201,7 +227,7 @@ server {
     server_name 178.128.156.225;
 
     location /static/ {
-        alias /opt/wallet-backend/staticfiles/;
+        alias /var/www/backend/staticfiles/;
     }
 
     location /api/ {
@@ -234,7 +260,7 @@ The public URLs become:
 
 ## 7. Business frontend
 
-Create `/opt/dsd-wallet/.env.production`:
+Create `/var/www/frontend/.env.production`:
 
 ```dotenv
 NEXT_PUBLIC_API_BASE_URL=http://178.128.156.225/api
@@ -244,7 +270,7 @@ NEXT_PUBLIC_GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
 Install and run it:
 
 ```bash
-cd /opt/dsd-wallet
+cd /var/www/frontend
 npm ci
 npm run build
 npm run start -- --hostname 127.0.0.1 --port 3000
@@ -260,8 +286,8 @@ After=network.target
 [Service]
 User=wallet
 Group=wallet
-WorkingDirectory=/opt/dsd-wallet
-EnvironmentFile=/opt/dsd-wallet/.env.production
+WorkingDirectory=/var/www/frontend
+EnvironmentFile=/var/www/frontend/.env.production
 ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3000
 Restart=always
 
@@ -276,7 +302,9 @@ sudo systemctl enable --now wallet-frontend
 
 ## 8. GitHub deployment
 
-The backend repository includes `.github/workflows/deploy.yml`; the business frontend repository has its own workflow at `.github/workflows/deploy.yml`. Both workflows validate before deploying over SSH.
+The backend repository `https://github.com/melchs22/Wallet-Backend` includes `.github/workflows/deploy.yml`; the business frontend repository `https://github.com/melchs22/dsd-wallet` has its own workflow at `.github/workflows/deploy.yml`. Both workflows validate before deploying over SSH.
+
+The workflows assume both repositories use the `main` branch. If the repositories use another default branch, change the `branches: [main]` line in the corresponding workflow before pushing.
 
 Add these Actions secrets to each GitHub repository:
 
@@ -284,12 +312,12 @@ Add these Actions secrets to each GitHub repository:
 DEPLOY_HOST=178.128.156.225
 DEPLOY_USER=your-ubuntu-user
 DEPLOY_SSH_PRIVATE_KEY=the-private-key-for-that-user
-APP_DIR=/opt/wallet-backend       # backend repository only
-FRONTEND_DIR=/opt/dsd-wallet      # frontend repository only
+APP_DIR=/var/www/backend       # backend repository only
+FRONTEND_DIR=/var/www/frontend      # frontend repository only
 GOOGLE_CLIENT_ID=...              # frontend repository only
 ```
 
-The server must already contain `.env` at `/opt/wallet-backend/.env` and `.env.production` at `/opt/dsd-wallet/.env.production`. These files are intentionally excluded from rsync and never stored in GitHub.
+The server must already contain `.env` at `/var/www/backend/.env` and `.env.production` at `/var/www/frontend/.env.production`. These files are intentionally excluded from rsync and never stored in GitHub.
 
 On the Ubuntu user, allow only the required service restarts without an interactive password prompt by adding a narrow sudoers rule with `sudo visudo`:
 
@@ -298,6 +326,8 @@ your-ubuntu-user ALL=(root) NOPASSWD: /bin/systemctl restart wallet-web wallet-c
 ```
 
 Push to `main` or manually run the `Deploy wallet platform` and `Deploy business frontend` workflows. Review the workflow logs and then check `http://178.128.156.225/`.
+
+The backend workflow deploys only `/var/www/backend`; the frontend workflow deploys only `/var/www/frontend`. They are intentionally independent because these are separate GitHub repositories.
 
 ## 9. Security before public launch
 

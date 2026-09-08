@@ -7,17 +7,22 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, TransferAttempt,
     LinkedProvider, ExchangeRate, Dispute, PaymentRequest, SplitRequest, SystemSetting,
-    MobileMoneyTransaction, ScheduledTransfer, Merchant,
+    MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
+    PushDevice,
 )
 
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ['handle', 'email', 'status', 'kyc_tier', 'is_staff', 'created_at']
+    list_display = ['handle', 'email', 'primary_phone_number', 'status', 'kyc_tier', 'is_staff', 'has_pin', 'created_at']
     list_filter = ['status', 'kyc_tier', 'is_staff']
-    search_fields = ['handle', 'email', 'google_sub']
+    search_fields = ['handle', 'email', 'google_sub', 'primary_phone_number']
     readonly_fields = ['google_sub', 'created_at', 'handle']
     actions = ['suspend_users', 'reactivate_users', 'force_logout']
+
+    @admin.display(description='Has PIN')
+    def has_pin(self, obj):
+        return bool(obj.transaction_pin)
 
     def suspend_users(self, request, queryset):
         # Redirect to intermediate page for reason input
@@ -111,6 +116,14 @@ class NotificationAdmin(admin.ModelAdmin):
         count = queryset.update(read_at=timezone.now())
         self.message_user(request, f'{count} notifications marked as read.', messages.SUCCESS)
     mark_read.short_description = 'Mark selected notifications as read'
+
+
+@admin.register(PushDevice)
+class PushDeviceAdmin(admin.ModelAdmin):
+    list_display = ['user', 'platform', 'active', 'last_seen_at', 'created_at']
+    list_filter = ['platform', 'active']
+    search_fields = ['user__email', 'user__handle', 'token']
+    readonly_fields = ['token', 'last_seen_at', 'created_at']
 
 
 @admin.register(ProcessedRequest)
@@ -323,6 +336,44 @@ class MerchantAdmin(admin.ModelAdmin):
     def generate_api_keys(self, request, queryset):
         self.message_user(request, 'Merchant API keys require the merchant payment schema migration.', messages.WARNING)
     generate_api_keys.short_description = 'Generate API keys (live mode)'
+
+
+@admin.register(TransactionApproval)
+class TransactionApprovalAdmin(admin.ModelAdmin):
+    list_display = ['id', 'approval_type', 'requester', 'approver', 'amount', 'currency', 'status', 'created_at']
+    list_filter = ['approval_type', 'status', 'currency']
+    search_fields = ['requester__handle', 'approver__handle']
+    readonly_fields = ['created_at']
+    actions = ['approve_approvals', 'decline_approvals']
+
+    def approve_approvals(self, request, queryset):
+        count = queryset.filter(status='pending').update(status='approved')
+        self.message_user(request, f'{count} approvals approved.', messages.SUCCESS)
+    approve_approvals.short_description = 'Approve selected approvals'
+
+    def decline_approvals(self, request, queryset):
+        count = queryset.filter(status='pending').update(status='declined')
+        self.message_user(request, f'{count} approvals declined.', messages.SUCCESS)
+    decline_approvals.short_description = 'Decline selected approvals'
+
+
+@admin.register(ParentalControl)
+class ParentalControlAdmin(admin.ModelAdmin):
+    list_display = ['id', 'parent', 'child', 'status', 'can_view_transactions', 'can_control_balance', 'can_send_money', 'linked_at', 'created_at']
+    list_filter = ['status', 'can_view_transactions', 'can_control_balance', 'can_send_money']
+    search_fields = ['parent__handle', 'child__handle', 'parent__email', 'child__email']
+    readonly_fields = ['verification_code', 'code_expires_at', 'linked_at', 'created_at']
+    actions = ['activate_controls', 'revoke_controls']
+
+    def activate_controls(self, request, queryset):
+        count = queryset.filter(status='pending').update(status='active', linked_at=timezone.now())
+        self.message_user(request, f'{count} parental controls activated.', messages.SUCCESS)
+    activate_controls.short_description = 'Activate selected controls'
+
+    def revoke_controls(self, request, queryset):
+        count = queryset.update(status='revoked')
+        self.message_user(request, f'{count} parental controls revoked.', messages.SUCCESS)
+    revoke_controls.short_description = 'Revoke selected controls'
 
 
 # Site-wide admin configuration - using default Django admin styling

@@ -42,7 +42,7 @@ class CheckoutConfirmSerializer(serializers.Serializer):
 
 class FeePreviewQuerySerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=20, decimal_places=2)
-    currency = serializers.CharField(max_length=3, default='USD')
+    currency = serializers.CharField(max_length=3, default='GNF')
     type = serializers.ChoiceField(choices=['merchant_transfer', 'p2p_transfer'], default='merchant_transfer')
     merchant_id = serializers.IntegerField(required=False)
 

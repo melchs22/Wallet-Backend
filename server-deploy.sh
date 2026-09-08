@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/wallet-backend}"
+APP_DIR="${APP_DIR:-/var/www/backend}"
 cd "$APP_DIR"
 
 if [[ ! -f .env ]]; then

@@ -78,14 +78,15 @@ def execute_p2p_transfer(
             raise TransferExecutionError('insufficient_funds', 'Insufficient funds')
 
         if not skip_limit_checks:
+            from wallet.services.limits import apply_usage_based_limits
+            apply_usage_based_limits(sender)
+            sender.refresh_from_db()
             if amount > sender.send_limit_per_tx:
                 raise TransferExecutionError('per_transaction_limit_exceeded', 'Per-transaction limit exceeded')
 
-            twenty_four_hours_ago = timezone.now() - timedelta(days=1)
-            sent_today = sender.sent_transactions.filter(
-                created_at__gte=twenty_four_hours_ago,
-                status=TransactionStatus.COMPLETED,
-            ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            # Check daily limit (auto-resets at midnight)
+            from wallet.services.limits import get_daily_sent_amount
+            sent_today = get_daily_sent_amount(sender)
 
             if sent_today + amount > sender.send_limit_daily:
                 raise TransferExecutionError('daily_limit_exceeded', 'Daily limit exceeded')
@@ -147,6 +148,9 @@ def execute_p2p_transfer(
         send_notification_task.delay(notification.id)
     except Exception:
         logger.exception('scheduled_transfer_notification_dispatch_failed')
+
+    from wallet.services.limits import apply_usage_based_limits
+    apply_usage_based_limits(sender)
 
     return transaction_obj
 
