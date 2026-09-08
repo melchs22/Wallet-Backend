@@ -3,3 +3,15 @@
 *.dump
 *.sql
 backups/
+
+# Flutter-generated output. Keep the wallert app source tracked.
+wallert app/build/
+wallert app/.dart_tool/
+wallert app/.flutter-plugins
+wallert app/.flutter-plugins-dependencies
+wallert app/android/.gradle/
+wallert app/android/local.properties
+wallert app/ios/Flutter/ephemeral/
+
+# Never commit Firebase Admin private credentials.
+**/*firebase-adminsdk*.json
