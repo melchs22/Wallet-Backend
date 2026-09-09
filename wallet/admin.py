@@ -3,6 +3,7 @@ from django.contrib import messages
 from django.urls import reverse
 from django.http import HttpResponse
 from django.utils import timezone
+from django_celery_beat.models import PeriodicTask, ClockedSchedule, IntervalSchedule, CrontabSchedule
 from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, TransferAttempt,
@@ -380,3 +381,9 @@ class ParentalControlAdmin(admin.ModelAdmin):
 admin.site.site_header = "Wallet Admin"
 admin.site.site_title = "Wallet Admin"
 admin.site.index_title = "Wallet Administration"
+
+# Register django-celery-beat models for task management
+admin.site.register(PeriodicTask)
+admin.site.register(IntervalSchedule)
+admin.site.register(CrontabSchedule)
+admin.site.register(ClockedSchedule)
