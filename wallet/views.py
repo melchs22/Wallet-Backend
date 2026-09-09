@@ -1136,6 +1136,7 @@ class TransferView(APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
+                # Check for existing pending approval to prevent duplicates
                 pending_approval = TransactionApproval.objects.filter(
                     requester=sender,
                     approver=recipient,
@@ -1150,6 +1151,7 @@ class TransferView(APIView):
                         status=status.HTTP_202_ACCEPTED,
                     )
 
+                # Create approval request for recipient to confirm with PIN
                 approval = TransactionApproval.objects.create(
                     approver=recipient,
                     requester=sender,
@@ -2801,6 +2803,7 @@ def pay_payment_request(request, request_id):
             payment_request.save(update_fields=['status'])
             return Response({'error': 'This request has expired'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Check for existing pending approval to prevent duplicates
         approval = payment_request.approval_requests.filter(
             approver=request.user,
             status=TransactionApproval.ApprovalStatus.PENDING,
@@ -2810,11 +2813,34 @@ def pay_payment_request(request, request_id):
                 {'status': 'pending_approval', 'approval_id': approval.id},
                 status=status.HTTP_202_ACCEPTED,
             )
-        return Response(
-            {'error': 'This payment request has no approval record. It cannot be paid directly.'},
-            status=status.HTTP_409_CONFLICT,
+
+        # Create approval request for payer to confirm with PIN
+        approval = TransactionApproval.objects.create(
+            approver=request.user,
+            requester=payment_request.requester,
+            approval_type='payment_request',
+            amount=payment_request.amount,
+            currency=payment_request.currency,
+            note=payment_request.note or 'Payment request',
+            payment_request=payment_request,
         )
-        
+        create_notification(
+            request.user,
+            'payment_request_received',
+            {
+                'approval_id': approval.id,
+                'requester_handle': payment_request.requester.handle,
+                'requester_display_name': payment_request.requester.display_name,
+                'amount': str(payment_request.amount),
+                'currency': payment_request.currency,
+                'note': payment_request.note,
+            },
+        )
+        return Response(
+            {'status': 'pending_approval', 'approval_id': approval.id},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
         payer = request.user
         from wallet.services.limits import apply_usage_based_limits
         apply_usage_based_limits(payer)

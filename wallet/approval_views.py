@@ -3,7 +3,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.utils import timezone
 from django.contrib.auth.hashers import check_password, make_password
-from .models import PaymentRequestStatus, TransactionApproval
+from .models import PaymentRequestStatus, TransactionApproval, ParentalControl
 from .serializers import TransactionApprovalSerializer, PinVerifySerializer
 
 
@@ -61,6 +61,23 @@ def approve_transaction(request, approval_id):
     from .services.transfers import execute_p2p_transfer
     from .models import SplitParticipant
 
+    if approval.approval_type == 'parental_link':
+        # Handle parental link approval
+        parental_control = ParentalControl.objects.filter(
+            parent=approval.requester,
+            child=approval.approver,
+            status=ParentalControl.Status.PENDING,
+        ).first()
+        if parental_control:
+            parental_control.status = ParentalControl.Status.ACTIVE
+            parental_control.linked_at = timezone.now()
+            parental_control.save()
+        approval.status = TransactionApproval.ApprovalStatus.APPROVED
+        approval.responded_at = timezone.now()
+        approval.save(update_fields=['status', 'responded_at'])
+        serializer = TransactionApprovalSerializer(approval)
+        return Response(serializer.data)
+    
     if approval.transaction is None:
         if approval.payment_request:
             payment_request = approval.payment_request

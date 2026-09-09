@@ -17,8 +17,8 @@ from .serializers import (
 @permission_classes([IsAuthenticated])
 def link_child_account(request):
     """
-    Link a child account by sending a 6-digit verification code to the child's device.
-    The parent enters the child's phone number, and a code is sent (simulated).
+    Link a child account by creating an approval request for the child to confirm with PIN.
+    The parent enters the child's phone number, and the child receives a notification to approve.
     """
     serializer = ParentalControlLinkSerializer(data=request.data)
     if not serializer.is_valid():
@@ -28,7 +28,7 @@ def link_child_account(request):
     
     # Find the child user by phone number
     try:
-        child = User.objects.get(primary_phone_number=child_phone)
+        child = User.objects.get(primary_phone_number=child_phone, status=User.Status.ACTIVE)
     except User.DoesNotExist:
         return Response({'error': 'User with this phone number not found'}, status=404)
     
@@ -40,27 +40,55 @@ def link_child_account(request):
     if ParentalControl.objects.filter(child=child, status=ParentalControl.Status.ACTIVE).exists():
         return Response({'error': 'This account already has an active parental control'}, status=400)
     
-    # Generate 6-digit verification code
-    verification_code = get_random_string(6, allowed_chars='0123456789')
-    code_expires_at = timezone.now() + timedelta(minutes=15)
+    # Check for existing pending approval to prevent duplicates
+    from .models import TransactionApproval
+    existing_approval = TransactionApproval.objects.filter(
+        approver=child,
+        requester=request.user,
+        approval_type='parental_link',
+        status=TransactionApproval.ApprovalStatus.PENDING,
+    ).order_by('-created_at').first()
+    if existing_approval:
+        return Response(
+            {'status': 'pending_approval', 'approval_id': existing_approval.id},
+            status=202,
+        )
     
-    # Create pending parental control
+    # Create approval request for child to confirm with PIN
+    approval = TransactionApproval.objects.create(
+        approver=child,
+        requester=request.user,
+        approval_type='parental_link',
+        amount=0,
+        currency='GNF',
+        note=f'Parental link request from {request.user.display_name}',
+    )
+    
+    # Create pending parental control (will be activated on approval)
     parental_control = ParentalControl.objects.create(
         parent=request.user,
         child=child,
         status=ParentalControl.Status.PENDING,
-        verification_code=verification_code,
-        code_expires_at=code_expires_at
     )
     
-    # In a real implementation, send the code via SMS/Notification
-    # For now, we'll return it in the response (for testing)
+    # Notify the child
+    from .views import create_notification
+    create_notification(
+        child,
+        'parental_link_requested',
+        {
+            'approval_id': approval.id,
+            'parent_handle': request.user.handle,
+            'parent_display_name': request.user.display_name,
+            'parental_control_id': parental_control.id,
+        },
+    )
+    
     return Response({
-        'message': 'Verification code sent to child device',
-        'verification_code': verification_code,  # TODO: Remove in production, send via SMS/Notification
-        'expires_at': code_expires_at.isoformat(),
-        'parental_control_id': parental_control.id
-    })
+        'status': 'pending_approval',
+        'approval_id': approval.id,
+        'message': 'Child will receive a notification to approve the parental link'
+    }, status=202)
 
 
 @api_view(['POST'])
