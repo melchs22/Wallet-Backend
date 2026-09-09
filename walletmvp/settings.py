@@ -34,7 +34,7 @@ def getenv_list(key: str, default):
 # Django Configuration
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-local-development-only')
 DEBUG = getenv_bool('DEBUG', False)
-ALLOWED_HOSTS = getenv_list('ALLOWED_HOSTS', ['localhost', '127.0.0.1', 'testserver'])
+ALLOWED_HOSTS = ['178.128.156.225', 'localhost', '127.0.0.1']
 
 # CORS Configuration
 FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'http://178.128.156.225:3000')
@@ -119,23 +119,17 @@ TEMPLATES = [
 WSGI_APPLICATION = 'walletmvp.wsgi.application'
 
 
-def database_from_url():
-    database_url = os.getenv('DATABASE_URL', '').strip()
-    if not database_url or database_url.startswith('sqlite'):
-        return {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'db.sqlite3'}
-    parsed = urlparse(database_url)
-    return {
+DATABASES = {
+    'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': parsed.path.lstrip('/'),
-        'USER': parsed.username or '',
-        'PASSWORD': parsed.password or '',
-        'HOST': parsed.hostname or '',
-        'PORT': str(parsed.port or 5432),
-        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '60')),
+        'NAME': 'walletmvp',
+        'USER': 'walletapp',
+        'PASSWORD': os.getenv('DB_PASSWORD', 'TUTU2005'),
+        'HOST': '127.0.0.1',
+        'PORT': '5432',
+        'CONN_MAX_AGE': 60,
     }
-
-
-DATABASES = {'default': database_from_url()}
+}
 
 
 # Custom user model
