@@ -61,6 +61,45 @@ def approve_transaction(request, approval_id):
     from .services.transfers import execute_p2p_transfer
     from .models import SplitParticipant
 
+    if approval.approval_type == 'money_sent':
+        # Handle money sent approval - execute transfer from sender to recipient
+        recipient_id = approval.metadata.get('recipient_id')
+        if recipient_id:
+            from .models import User
+            try:
+                recipient = User.objects.get(id=recipient_id)
+                transaction_obj = execute_p2p_transfer(
+                    sender=approval.approver,
+                    recipient=recipient,
+                    amount=approval.amount,
+                    currency=approval.currency,
+                    note=approval.note,
+                    idempotency_key=f'transfer-approval-{approval.id}',
+                )
+                approval.transaction = transaction_obj
+                
+                # Notify recipient that transfer completed
+                from .views import create_notification
+                create_notification(
+                    recipient,
+                    'transfer_received',
+                    {
+                        'sender_handle': approval.approver.handle,
+                        'sender_display_name': approval.approver.display_name,
+                        'amount': str(approval.amount),
+                        'currency': approval.currency,
+                        'note': approval.note,
+                        'transaction_id': str(transaction_obj.id),
+                    },
+                )
+            except Exception as e:
+                return Response({'error': str(e)}, status=400)
+        approval.status = TransactionApproval.ApprovalStatus.APPROVED
+        approval.responded_at = timezone.now()
+        approval.save(update_fields=['status', 'responded_at', 'transaction'])
+        serializer = TransactionApprovalSerializer(approval)
+        return Response(serializer.data)
+    
     if approval.approval_type == 'parental_link':
         # Handle parental link approval
         parental_control = ParentalControl.objects.filter(
@@ -75,6 +114,45 @@ def approve_transaction(request, approval_id):
         approval.status = TransactionApproval.ApprovalStatus.APPROVED
         approval.responded_at = timezone.now()
         approval.save(update_fields=['status', 'responded_at'])
+        serializer = TransactionApprovalSerializer(approval)
+        return Response(serializer.data)
+    
+    if approval.approval_type == 'qr_payment':
+        # Handle QR payment approval - execute transfer to recipient
+        recipient_id = approval.metadata.get('recipient_id')
+        if recipient_id:
+            from .models import User
+            try:
+                recipient = User.objects.get(id=recipient_id)
+                transaction_obj = execute_p2p_transfer(
+                    sender=approval.approver,
+                    recipient=recipient,
+                    amount=approval.amount,
+                    currency=approval.currency,
+                    note=approval.note,
+                    idempotency_key=f'qr-approval-{approval.id}',
+                )
+                approval.transaction = transaction_obj
+                
+                # Notify recipient that QR payment completed
+                from .views import create_notification
+                create_notification(
+                    recipient,
+                    'qr_payment_received',
+                    {
+                        'payer_handle': approval.approver.handle,
+                        'payer_display_name': approval.approver.display_name,
+                        'amount': str(approval.amount),
+                        'currency': approval.currency,
+                        'note': approval.note,
+                        'transaction_id': str(transaction_obj.id),
+                    },
+                )
+            except Exception as e:
+                return Response({'error': str(e)}, status=400)
+        approval.status = TransactionApproval.ApprovalStatus.APPROVED
+        approval.responded_at = timezone.now()
+        approval.save(update_fields=['status', 'responded_at', 'transaction'])
         serializer = TransactionApprovalSerializer(approval)
         return Response(serializer.data)
     

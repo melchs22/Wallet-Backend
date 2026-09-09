@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils.crypto import get_random_string
 from datetime import timedelta
-from .models import ParentalControl, User, Wallet, Transaction
+from .models import ParentalControl, User, Wallet, Transaction, UserStatus
 from .serializers import (
     ParentalControlSerializer, ParentalControlLinkSerializer,
     ParentalControlVerifySerializer, ParentalControlUpdateSerializer
@@ -28,7 +28,7 @@ def link_child_account(request):
     
     # Find the child user by phone number
     try:
-        child = User.objects.get(primary_phone_number=child_phone, status=User.Status.ACTIVE)
+        child = User.objects.get(primary_phone_number=child_phone, status=UserStatus.ACTIVE)
     except User.DoesNotExist:
         return Response({'error': 'User with this phone number not found'}, status=404)
     

@@ -1139,8 +1139,8 @@ class TransferView(APIView):
                 # Check for existing pending approval to prevent duplicates
                 pending_approval = TransactionApproval.objects.filter(
                     requester=sender,
-                    approver=recipient,
-                    approval_type='money_received',
+                    approver=sender,
+                    approval_type='money_sent',
                     status=TransactionApproval.ApprovalStatus.PENDING,
                     note=note,
                     amount=amount,
@@ -1151,20 +1151,22 @@ class TransferView(APIView):
                         status=status.HTTP_202_ACCEPTED,
                     )
 
-                # Create approval request for recipient to confirm with PIN
+                # Create approval request for sender to confirm with PIN
                 approval = TransactionApproval.objects.create(
-                    approver=recipient,
+                    approver=sender,
                     requester=sender,
-                    approval_type='money_received',
+                    approval_type='money_sent',
                     amount=amount,
                     currency=currency,
                     note=note,
+                    metadata={'recipient_id': recipient.id}
                 )
+                
+                # Notify recipient about incoming transfer
                 create_notification(
                     recipient,
-                    'transfer_approval_requested',
+                    'incoming_transfer',
                     {
-                        'approval_id': approval.id,
                         'sender_handle': sender.handle,
                         'sender_display_name': sender.display_name,
                         'amount': str(amount),
@@ -1172,6 +1174,7 @@ class TransferView(APIView):
                         'note': note,
                     },
                 )
+                
                 return Response(
                     {'status': 'pending_approval', 'approval_id': approval.id},
                     status=status.HTTP_202_ACCEPTED,
@@ -3273,19 +3276,58 @@ def pay_qr_payload(request):
         recipient = User.objects.get(primary_phone_number=payload['phone'], status=UserStatus.ACTIVE)
         if recipient == request.user:
             return Response({'error': 'Cannot pay yourself'}, status=status.HTTP_400_BAD_REQUEST)
-        transfer_serializer = TransferRequestSerializer(data={
-            'recipient_phone': recipient.primary_phone_number,
-            'amount': amount,
-            'currency': request.data.get('currency', 'GNF'),
-            'note': request.data.get('note') or payload.get('note', 'QR payment'),
-            'idempotency_key': request.data.get('idempotency_key') or uuid.uuid4().hex,
-        })
-        if not transfer_serializer.is_valid():
-            return Response(transfer_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        from rest_framework.test import APIRequestFactory, force_authenticate
-        transfer_request = APIRequestFactory().post('/api/transfers', transfer_serializer.validated_data, format='json')
-        force_authenticate(transfer_request, user=request.user)
-        return TransferView.as_view()(transfer_request)
+        
+        # For QR payments, the payer (scanner) is the one initiating the payment
+        # so they should be the requester, and we don't require recipient approval
+        # Create approval for the payer to confirm with PIN
+        from decimal import Decimal
+        amount_decimal = Decimal(str(amount))
+        currency = request.data.get('currency', 'GNF')
+        note = request.data.get('note') or payload.get('note', 'QR payment')
+        
+        # Check for existing pending approval to prevent duplicates
+        pending_approval = TransactionApproval.objects.filter(
+            requester=request.user,
+            approver=request.user,
+            approval_type='qr_payment',
+            status=TransactionApproval.ApprovalStatus.PENDING,
+            note=note,
+            amount=amount_decimal,
+        ).order_by('-created_at').first()
+        if pending_approval:
+            return Response(
+                {'status': 'pending_approval', 'approval_id': pending_approval.id},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        
+        # Create approval request for payer to confirm with PIN
+        approval = TransactionApproval.objects.create(
+            approver=request.user,
+            requester=request.user,
+            approval_type='qr_payment',
+            amount=amount_decimal,
+            currency=currency,
+            note=note,
+            metadata={'recipient_id': recipient.id, 'qr_payload': payload}
+        )
+        
+        # Notify recipient about incoming QR payment
+        create_notification(
+            recipient,
+            'incoming_qr_payment',
+            {
+                'payer_handle': request.user.handle,
+                'payer_display_name': request.user.display_name,
+                'amount': str(amount_decimal),
+                'currency': currency,
+                'note': note,
+            },
+        )
+        
+        return Response(
+            {'status': 'pending_approval', 'approval_id': approval.id},
+            status=status.HTTP_202_ACCEPTED,
+        )
     except User.DoesNotExist:
         return Response({'error': 'User not found or inactive'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as exc:
