@@ -210,18 +210,18 @@ def send_to_child(request, child_id):
     
     try:
         parent_wallet = Wallet.objects.get(user=request.user)
-        child_wallet = Wallet.objects.get(user_id=child_id)
+        Wallet.objects.get(user_id=child_id)
     except Wallet.DoesNotExist:
         return Response({'error': 'Wallet not found'}, status=404)
     
     # Create transfer from parent to child
     from decimal import Decimal
-    from .services.transfers import execute_transfer
+    from .services.transfers import execute_p2p_transfer
     
     try:
-        transfer = execute_transfer(
-            sender_wallet=parent_wallet,
-            recipient_user=parental_control.child,
+        transfer = execute_p2p_transfer(
+            sender=request.user,
+            recipient=parental_control.child,
             amount=Decimal(amount),
             currency=parent_wallet.currency,
             note=f"Parental transfer: {note}" if note else "Parental transfer"

@@ -595,12 +595,12 @@ class ScheduledTransferSerializer(serializers.ModelSerializer):
     """
     Serializer for scheduled transfers.
     """
-    recipient_handle = serializers.CharField(source='recipient.handle', read_only=True)
+    recipient_phone = serializers.CharField(source='recipient.primary_phone_number', read_only=True)
 
     class Meta:
         model = ScheduledTransfer
         fields = [
-            'id', 'sender', 'recipient', 'recipient_handle', 'amount', 'currency',
+            'id', 'sender', 'recipient', 'recipient_phone', 'amount', 'currency',
             'frequency', 'next_execution', 'last_execution', 'end_date',
             'total_executions', 'max_executions', 'status', 'note',
             'created_at', 'updated_at'
@@ -612,7 +612,7 @@ class ScheduledTransferCreateSerializer(serializers.Serializer):
     """
     Serializer for creating a scheduled transfer.
     """
-    recipient_handle = serializers.CharField(required=True)
+    recipient_phone = serializers.CharField(required=True, max_length=30)
     amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=True)
     currency = serializers.CharField(max_length=3, required=True)
     frequency = serializers.ChoiceField(choices=ScheduleFrequency.choices, required=True)

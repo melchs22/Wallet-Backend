@@ -3,7 +3,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.utils import timezone
 from django.contrib.auth.hashers import check_password, make_password
-from .models import TransactionApproval
+from .models import PaymentRequestStatus, TransactionApproval
 from .serializers import TransactionApprovalSerializer, PinVerifySerializer
 
 
@@ -58,26 +58,58 @@ def approve_transaction(request, approval_id):
         approval.save()
         return Response({'error': 'Approval has expired'}, status=400)
     
+    from .services.transfers import execute_p2p_transfer
+    from .models import SplitParticipant
+
+    if approval.transaction is None:
+        if approval.payment_request:
+            payment_request = approval.payment_request
+            if payment_request.status != PaymentRequestStatus.PENDING:
+                return Response({'error': 'Payment request is no longer pending'}, status=400)
+            transaction_obj = execute_p2p_transfer(
+                sender=approval.approver,
+                recipient=approval.requester,
+                amount=payment_request.amount,
+                currency=payment_request.currency,
+                note=payment_request.note or 'Payment for request',
+                idempotency_key=f'approval-{approval.id}',
+            )
+            payment_request.status = PaymentRequestStatus.PAID
+            payment_request.resulting_transaction = transaction_obj
+            payment_request.save(update_fields=['status', 'resulting_transaction'])
+        elif approval.split_request:
+            participant = SplitParticipant.objects.select_related('payment_request').filter(
+                split_request=approval.split_request,
+                payment_request__payer=approval.approver,
+                payment_request__status=PaymentRequestStatus.PENDING,
+            ).first()
+            if not participant:
+                return Response({'error': 'Split participant is no longer pending'}, status=400)
+            transaction_obj = execute_p2p_transfer(
+                sender=approval.approver,
+                recipient=approval.requester,
+                amount=participant.amount_owed,
+                currency=approval.currency,
+                note=approval.note,
+                idempotency_key=f'approval-{approval.id}',
+            )
+            participant.payment_request.status = PaymentRequestStatus.PAID
+            participant.payment_request.resulting_transaction = transaction_obj
+            participant.payment_request.save(update_fields=['status', 'resulting_transaction'])
+        else:
+            transaction_obj = execute_p2p_transfer(
+                sender=approval.requester,
+                recipient=approval.approver,
+                amount=approval.amount,
+                currency=approval.currency,
+                note=approval.note,
+                idempotency_key=f'approval-{approval.id}',
+            )
+            approval.transaction = transaction_obj
+
     approval.status = TransactionApproval.ApprovalStatus.APPROVED
-    approval.save()
-    
-    # Process the approved transaction/request
-    if approval.transaction:
-        # Transaction is already created, just mark as approved
-        pass
-    elif approval.payment_request:
-        # Mark payment request as approved
-        from .models import PaymentRequestStatus
-        approval.payment_request.status = PaymentRequestStatus.PAID
-        approval.payment_request.save()
-    elif approval.split_request:
-        # Mark split participant as approved
-        participant = approval.split_request.participants.filter(
-            payment_request=approval.payment_request
-        ).first()
-        if participant:
-            participant.status = 'approved'
-            participant.save()
+    approval.responded_at = timezone.now()
+    approval.save(update_fields=['status', 'responded_at', 'transaction'])
     
     serializer = TransactionApprovalSerializer(approval)
     return Response(serializer.data)
@@ -116,17 +148,15 @@ def decline_transaction(request, approval_id):
         return Response({'error': 'Approval not found or already processed'}, status=404)
     
     approval.status = TransactionApproval.ApprovalStatus.DECLINED
-    approval.save()
+    approval.responded_at = timezone.now()
+    approval.save(update_fields=['status', 'responded_at'])
     
     # Process the declined transaction/request
     if approval.payment_request:
-        from .models import PaymentRequestStatus
         approval.payment_request.status = PaymentRequestStatus.DECLINED
         approval.payment_request.save()
     elif approval.split_request:
-        participant = approval.split_request.participants.filter(
-            payment_request=approval.payment_request
-        ).first()
+        participant = approval.split_request.participants.filter(payment_request__payer=request.user).first()
         if participant:
             participant.status = 'declined'
             participant.save()

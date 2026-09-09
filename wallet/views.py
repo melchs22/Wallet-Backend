@@ -1116,6 +1116,64 @@ class TransferView(APIView):
                         {'error': 'Cannot send to yourself'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+                sender_wallet = Wallet.objects.select_for_update().get(id=sender_wallet.id)
+                current_balance = sender_wallet.get_balance()
+                if current_balance < amount:
+                    return Response(
+                        {'code': 'insufficient_funds', 'message': 'Insufficient funds'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if amount > sender.send_limit_per_tx:
+                    return Response(
+                        {'code': 'per_transaction_limit_exceeded', 'message': 'Amount exceeds per-transaction limit'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                from wallet.services.limits import get_daily_sent_amount
+                if get_daily_sent_amount(sender) + amount > sender.send_limit_daily:
+                    return Response(
+                        {'code': 'daily_limit_exceeded', 'message': 'Amount exceeds daily limit'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                pending_approval = TransactionApproval.objects.filter(
+                    requester=sender,
+                    approver=recipient,
+                    approval_type='money_received',
+                    status=TransactionApproval.ApprovalStatus.PENDING,
+                    note=note,
+                    amount=amount,
+                ).order_by('-created_at').first()
+                if pending_approval:
+                    return Response(
+                        {'status': 'pending_approval', 'approval_id': pending_approval.id},
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+
+                approval = TransactionApproval.objects.create(
+                    approver=recipient,
+                    requester=sender,
+                    approval_type='money_received',
+                    amount=amount,
+                    currency=currency,
+                    note=note,
+                )
+                create_notification(
+                    recipient,
+                    'transfer_approval_requested',
+                    {
+                        'approval_id': approval.id,
+                        'sender_handle': sender.handle,
+                        'sender_display_name': sender.display_name,
+                        'amount': str(amount),
+                        'currency': currency,
+                        'note': note,
+                    },
+                )
+                return Response(
+                    {'status': 'pending_approval', 'approval_id': approval.id},
+                    status=status.HTTP_202_ACCEPTED,
+                )
                 
                 # Lock sender's wallet row
                 sender_wallet = Wallet.objects.select_for_update().get(id=sender_wallet.id)
@@ -2593,22 +2651,21 @@ def create_payment_request(request):
             status=PaymentRequestStatus.PENDING
         )
         
+        # Create transaction approval request
+        from wallet.services.webhooks import create_payment_request_approval
+        approval = create_payment_request_approval(payment_request)
         create_notification(
             payer,
             'payment_request_received',
             {
-                'requester_handle': requester.handle,
+                'approval_id': approval.id,
                 'requester_display_name': requester.display_name,
                 'amount': str(amount),
                 'currency': currency,
                 'note': note,
-                'payment_request_id': payment_request.id
+                'payment_request_id': payment_request.id,
             }
         )
-        
-        # Create transaction approval request
-        from wallet.services.webhooks import create_payment_request_approval
-        create_payment_request_approval(payment_request)
         
         return Response(
             PaymentRequestSerializer(payment_request).data,
@@ -2738,14 +2795,25 @@ def pay_payment_request(request, request_id):
                 {'error': f'Request status is {payment_request.status}, not pending'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         if payment_request.expires_at < timezone.now():
             payment_request.status = PaymentRequestStatus.EXPIRED
-            payment_request.save()
+            payment_request.save(update_fields=['status'])
+            return Response({'error': 'This request has expired'}, status=status.HTTP_400_BAD_REQUEST)
+
+        approval = payment_request.approval_requests.filter(
+            approver=request.user,
+            status=TransactionApproval.ApprovalStatus.PENDING,
+        ).order_by('-created_at').first()
+        if approval:
             return Response(
-                {'error': 'This request has expired'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'status': 'pending_approval', 'approval_id': approval.id},
+                status=status.HTTP_202_ACCEPTED,
             )
+        return Response(
+            {'error': 'This payment request has no approval record. It cannot be paid directly.'},
+            status=status.HTTP_409_CONFLICT,
+        )
         
         payer = request.user
         from wallet.services.limits import apply_usage_based_limits
@@ -3027,6 +3095,7 @@ def get_qr_payload(request):
         payload = {
             'type': 'pay',
             'handle': user.handle,
+            'phone': user.primary_phone_number,
             'exp': exp
         }
         if amount:
@@ -3122,16 +3191,16 @@ def verify_qr_payload(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        handle = payload.get('handle')
-        if not handle:
+        phone = payload.get('phone')
+        if not phone:
             return Response(
-                {'error': 'Missing handle in payload'},
+                {'error': 'Missing phone in payload'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         # Resolve the user
         try:
-            user = User.objects.get(handle=handle, status=UserStatus.ACTIVE)
+            user = User.objects.get(primary_phone_number=phone, status=UserStatus.ACTIVE)
         except User.DoesNotExist:
             return Response(
                 {'error': 'User not found or inactive'},
@@ -3141,6 +3210,7 @@ def verify_qr_payload(request):
         return Response(
             {
                 'valid': True,
+                'primary_phone_number': user.primary_phone_number,
                 'handle': user.handle,
                 'display_name': user.display_name,
                 'avatar_url': user.avatar_url,
@@ -3174,11 +3244,11 @@ def pay_qr_payload(request):
         payload = json.loads(payload_json)
         if payload.get('type') not in ('pay', 'merchant_pay') or (payload.get('exp') and timezone.now().timestamp() > payload['exp']):
             return Response({'error': 'QR code is invalid or expired'}, status=status.HTTP_400_BAD_REQUEST)
-        recipient = User.objects.get(handle=payload['handle'], status=UserStatus.ACTIVE)
+        recipient = User.objects.get(primary_phone_number=payload['phone'], status=UserStatus.ACTIVE)
         if recipient == request.user:
             return Response({'error': 'Cannot pay yourself'}, status=status.HTTP_400_BAD_REQUEST)
         transfer_serializer = TransferRequestSerializer(data={
-            'recipient_handle': recipient.handle,
+            'recipient_phone': recipient.primary_phone_number,
             'amount': amount,
             'currency': request.data.get('currency', 'GNF'),
             'note': request.data.get('note') or payload.get('note', 'QR payment'),
@@ -3239,7 +3309,10 @@ def create_split(request):
     try:
         data = request.data
         creator = request.user
-        total_amount = Decimal(str(data.get('total_amount', '0')))
+        try:
+            total_amount = Decimal(str(data.get('total_amount', '0')))
+        except (InvalidOperation, TypeError, ValueError):
+            return Response({'error': 'Total amount must be a valid number'}, status=status.HTTP_400_BAD_REQUEST)
         currency = data.get('currency', 'GNF')
         note = data.get('note', '')
         participants_data = data.get('participants', [])
@@ -3249,9 +3322,13 @@ def create_split(request):
                 {'error': 'Total amount must be greater than zero'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        if creator.status != UserStatus.ACTIVE or creator.wallet.status != WalletStatus.ACTIVE:
+            return Response({'error': 'Your account or wallet is not active'}, status=status.HTTP_403_FORBIDDEN)
         
         participants_list = []
         total_assigned = Decimal('0.00')
+        participant_phones = set()
         
         for p in participants_data:
             phone = str(p.get('phone', '')).strip()
@@ -3262,10 +3339,14 @@ def create_split(request):
                     {'error': 'Each participant must have a phone number and amount'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            if phone in participant_phones:
+                return Response({'error': f'Participant {phone} was added more than once'}, status=status.HTTP_400_BAD_REQUEST)
+            if phone == creator.primary_phone_number:
+                return Response({'error': 'You cannot add yourself to your split bill'}, status=status.HTTP_400_BAD_REQUEST)
             
             try:
                 amount = Decimal(amount_str)
-            except:
+            except (InvalidOperation, TypeError, ValueError):
                 return Response(
                     {'error': f'Invalid amount for {phone}'},
                     status=status.HTTP_400_BAD_REQUEST
@@ -3278,6 +3359,7 @@ def create_split(request):
                 )
             
             total_assigned += amount
+            participant_phones.add(phone)
             participants_list.append({'phone': phone, 'amount': amount})
         
         if total_assigned != total_amount:
@@ -3318,24 +3400,23 @@ def create_split(request):
                     amount_owed=amount_owed
                 )
                 
+                # Create transaction approval request for split participant
+                from wallet.services.webhooks import create_split_approval
+                participant_obj = split.participants.get(payment_request=payment_request)
+                approval = create_split_approval(split, participant_obj)
                 create_notification(
                     payer,
                     'split_request_received',
                     {
-                        'creator_handle': creator.handle,
+                        'approval_id': approval.id,
                         'creator_display_name': creator.display_name,
                         'amount': str(amount_owed),
                         'currency': currency,
                         'total_split_amount': str(total_amount),
                         'split_id': split.id,
-                        'payment_request_id': payment_request.id
+                        'payment_request_id': payment_request.id,
                     }
                 )
-                
-                # Create transaction approval request for split participant
-                from wallet.services.webhooks import create_split_approval
-                participant_obj = split.participants.get(payment_request=payment_request)
-                create_split_approval(split, participant_obj)
         
         return Response(
             {
@@ -4276,7 +4357,7 @@ def create_scheduled_transfer(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    recipient_handle = serializer.validated_data['recipient_handle']
+    recipient_phone = serializer.validated_data['recipient_phone']
     amount = serializer.validated_data['amount']
     currency = serializer.validated_data['currency']
     frequency = serializer.validated_data['frequency']
@@ -4290,7 +4371,7 @@ def create_scheduled_transfer(request):
             # Resolve recipient
             try:
                 recipient = User.objects.get(
-                    handle=recipient_handle,
+                    primary_phone_number=recipient_phone,
                     status=UserStatus.ACTIVE
                 )
             except User.DoesNotExist:
@@ -4344,7 +4425,7 @@ def create_scheduled_transfer(request):
                 action='scheduled_transfer_created',
                 metadata={
                     'scheduled_transfer_id': scheduled_transfer.id,
-                    'recipient_handle': recipient_handle,
+                    'recipient_phone': recipient_phone,
                     'amount': str(amount),
                     'currency': currency,
                     'frequency': frequency,

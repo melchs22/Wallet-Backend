@@ -8,11 +8,34 @@ logger = logging.getLogger(__name__)
 
 def create_notification_record(user, notification_type, payload):
     """Create the notification row (synchronous, inside the caller's transaction)."""
+    payload = dict(payload or {})
+    payload.setdefault('title', {
+        'transfer_approval_requested': 'Transfer approval required',
+        'payment_request_received': 'Payment request received',
+        'split_request_received': 'Split payment requested',
+        'transfer_received': 'Money received',
+        'payment_request_paid': 'Payment request paid',
+    }.get(notification_type, 'DSD PAY'))
+    payload.setdefault('message', _notification_message(notification_type, payload))
     return Notification.objects.create(
         user=user,
         type=notification_type,
         payload=payload,
     )
+
+
+def _notification_message(notification_type, payload):
+    amount = payload.get('amount')
+    currency = payload.get('currency', '')
+    if notification_type == 'transfer_approval_requested':
+        return f"{payload.get('sender_display_name', 'A user')} wants to send {amount} {currency}."
+    if notification_type == 'payment_request_received':
+        return f"{payload.get('requester_display_name', 'A user')} requested {amount} {currency}."
+    if notification_type == 'split_request_received':
+        return f"A split payment request for {amount} {currency} needs your approval."
+    if notification_type == 'transfer_received':
+        return f"You received {amount} {currency}."
+    return 'You have a new wallet update.'
 
 
 def deliver_notification(notification_id):
