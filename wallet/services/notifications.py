@@ -97,7 +97,7 @@ def _send_push(notification):
     try:
         firebase_admin.get_app()
     except ValueError:
-        credential_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS') or os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH')
+        credential_path = '/var/www/backend/Wallet-Backend/dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
         credential_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
         if credential_json:
             try:
