@@ -64,6 +64,12 @@ from .authentication import issue_access_token
 logger = logging.getLogger(__name__)
 
 
+def user_has_approved_kyc(user):
+    if user.kyc_tier != KYCTier.TIER_0:
+        return True
+    return UserKYCSubmission.objects.filter(user=user, status=UserKYCSubmission.Status.APPROVED).exists()
+
+
 def get_qr_signing_secret():
     """Get the secret key for QR code signing."""
     return getattr(settings, 'QR_SIGNING_SECRET', 'default-qr-secret-change-in-production')
@@ -150,6 +156,7 @@ class EmailSignupView(APIView):
         primary_phone_number = serializer.validated_data.get('primary_phone_number', phone_number).strip()
         transaction_pin = serializer.validated_data.get('transaction_pin', '').strip()
         country_code = serializer.validated_data.get('country_code', '').strip().upper()
+        device_id = (serializer.validated_data.get('device_id') or '').strip()
 
         if country_code and not SupportedCountry.objects.filter(code=country_code, active=True).exists():
             return Response({'error': 'This country is not currently supported.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -169,6 +176,7 @@ class EmailSignupView(APIView):
                 primary_phone_number=primary_phone_number if primary_phone_number else None,
                 kyc_tier=KYCTier.TIER_0,
                 status=UserStatus.ACTIVE,
+                current_device_id=device_id or None,
             )
             # Set transaction PIN
             if transaction_pin:
@@ -276,15 +284,47 @@ class EmailLoginView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        email = serializer.validated_data['email'].strip().lower()
+        identifier = (serializer.validated_data.get('identifier') or serializer.validated_data.get('email') or '').strip()
         password = serializer.validated_data['password']
-
-        user = authenticate(request, username=email, password=password)
+        country_code = serializer.validated_data.get('country_code', '').strip().upper()
+        device_id = (serializer.validated_data.get('device_id') or '').strip()
+        if '@' in identifier:
+            user = authenticate(request, username=identifier.lower(), password=password)
+        else:
+            country = SupportedCountry.objects.filter(code=country_code, active=True).first() if country_code else None
+            dial_code = country.dial_code if country else ''
+            phone_candidates = [identifier]
+            if dial_code and not identifier.startswith('+'):
+                phone_candidates.append(f'{dial_code}{identifier.lstrip("0")}')
+            user = User.objects.filter(
+                Q(primary_phone_number__in=phone_candidates) | Q(phone_number__in=phone_candidates)
+            ).first()
+            if user is not None and not user.check_password(password):
+                user = None
         if user is None:
             return Response({'error': 'Invalid email or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         if user.status != UserStatus.ACTIVE:
             return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if user.current_device_id and device_id and device_id != user.current_device_id:
+            previous_device = user.current_device_id
+            for device in PushDevice.objects.filter(user=user, active=True).exclude(device_id=device_id or '').exclude(device_id=''):
+                create_notification(
+                    user,
+                    'device_signed_in_elsewhere',
+                    {
+                        'title': 'Security notice',
+                        'message': f'A new device signed in to your account. Previous device {previous_device} was signed out.',
+                        'previous_device_id': previous_device,
+                        'new_device_id': device_id,
+                    },
+                )
+            user.current_device_id = device_id
+            user.save(update_fields=['current_device_id'])
+        elif device_id:
+            user.current_device_id = device_id
+            user.save(update_fields=['current_device_id'])
 
         login(request, user)
         wallet = getattr(user, 'wallet', None)
@@ -920,10 +960,14 @@ class PushDeviceView(APIView):
             token=serializer.validated_data['token'],
             defaults={
                 'user': request.user,
+                'device_id': serializer.validated_data.get('device_id', ''),
                 'platform': serializer.validated_data.get('platform', ''),
                 'active': True,
             },
         )
+        if serializer.validated_data.get('device_id'):
+            request.user.current_device_id = serializer.validated_data['device_id']
+            request.user.save(update_fields=['current_device_id'])
         return Response({'id': device.id, 'registered': True}, status=status.HTTP_200_OK)
 
     def delete(self, request):
@@ -959,6 +1003,8 @@ class TransferView(APIView):
         idempotency_key = serializer.validated_data['idempotency_key']
 
         sender = request.user
+        if not user_has_approved_kyc(sender):
+            return Response({'error': 'KYC verification is required before sending money. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
         from wallet.services.limits import apply_usage_based_limits
         apply_usage_based_limits(sender)
         sender_wallet = sender.wallet
@@ -3339,6 +3385,8 @@ def pay_qr_payload(request):
     """Pay a signed user QR code after the payer confirms the amount."""
     encoded = str(request.data.get('encoded', '')).strip()
     amount = request.data.get('amount')
+    if not user_has_approved_kyc(request.user):
+        return Response({'error': 'KYC verification is required before scanning or sending QR payments. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
     if not encoded or amount in (None, ''):
         return Response({'error': 'encoded and amount are required'}, status=status.HTTP_400_BAD_REQUEST)
     try:

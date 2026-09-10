@@ -6,6 +6,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils.crypto import get_random_string
 from datetime import timedelta
+from decimal import Decimal
 from .models import ParentalControl, User, Wallet, Transaction, UserStatus
 from .serializers import (
     ParentalControlSerializer, ParentalControlLinkSerializer,
@@ -316,10 +317,27 @@ def update_parental_permissions(request, control_id):
     
     # Update permissions
     for field, value in serializer.validated_data.items():
-        setattr(parental_control, field, value)
-    
+        if field in {'can_view_transactions', 'can_control_balance', 'can_send_money', 'can_set_limits'}:
+            setattr(parental_control, field, value)
+
+    child = parental_control.child
+    if 'send_limit_per_tx' in request.data:
+        try:
+            child.send_limit_per_tx = Decimal(str(request.data['send_limit_per_tx']))
+            child.limits_manually_set = True
+            child.save(update_fields=['send_limit_per_tx', 'limits_manually_set'])
+        except Exception:
+            return Response({'error': 'send_limit_per_tx must be a valid decimal amount'}, status=400)
+    if 'send_limit_daily' in request.data:
+        try:
+            child.send_limit_daily = Decimal(str(request.data['send_limit_daily']))
+            child.limits_manually_set = True
+            child.save(update_fields=['send_limit_daily', 'limits_manually_set'])
+        except Exception:
+            return Response({'error': 'send_limit_daily must be a valid decimal amount'}, status=400)
+
     parental_control.save()
-    
+
     serializer = ParentalControlSerializer(parental_control)
     return Response(serializer.data)
 

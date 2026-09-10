@@ -54,6 +54,7 @@ class EmailSignupSerializer(serializers.Serializer):
     confirm_password = serializers.CharField(write_only=True, min_length=8)
     terms_accepted = serializers.BooleanField(write_only=True)
     country_code = serializers.CharField(required=False, allow_blank=True, max_length=2)
+    device_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
     def validate(self, attrs):
         if attrs['password'] != attrs['confirm_password']:
@@ -64,8 +65,16 @@ class EmailSignupSerializer(serializers.Serializer):
 
 
 class EmailLoginSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    identifier = serializers.CharField(required=False, allow_blank=False)
+    email = serializers.EmailField(required=False)
+    country_code = serializers.CharField(required=False, allow_blank=True, max_length=2)
+    device_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
     password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        if not attrs.get('identifier') and not attrs.get('email'):
+            raise serializers.ValidationError({'identifier': 'Email or phone number is required.'})
+        return attrs
 
 
 class ChangePasswordSerializer(serializers.Serializer):
@@ -197,6 +206,7 @@ class NotificationSerializer(serializers.ModelSerializer):
 
 class PushDeviceSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=512)
+    device_id = serializers.CharField(max_length=255, required=False, allow_blank=True)
     platform = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
 

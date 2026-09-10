@@ -225,6 +225,7 @@ class User(AbstractUser):
     is_agent = models.BooleanField(default=False)  # B8: Agent flag for future cash network
     must_change_password = models.BooleanField(default=False)
     transaction_pin = models.CharField(max_length=128, null=True, blank=True, help_text="Hashed 4-digit PIN for transaction approvals")
+    current_device_id = models.CharField(max_length=255, null=True, blank=True, db_index=True, help_text="Single active device login token")
     created_at = models.DateTimeField(auto_now_add=True)
 
     # For OAuth users, use email as USERNAME_FIELD
@@ -462,6 +463,7 @@ class Notification(models.Model):
 class PushDevice(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='push_devices')
     token = models.CharField(max_length=512, unique=True)
+    device_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
     platform = models.CharField(max_length=20, blank=True, default='')
     active = models.BooleanField(default=True)
     last_seen_at = models.DateTimeField(auto_now=True)
@@ -1199,6 +1201,7 @@ class TransactionApproval(models.Model):
     note = models.TextField(blank=True, default='')
     expires_at = models.DateTimeField(default=default_request_expiry)
     responded_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
     webhook_delivered = models.BooleanField(default=False)
     webhook_delivery_count = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

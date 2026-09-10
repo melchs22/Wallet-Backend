@@ -1294,3 +1294,94 @@ class TransferAttemptTest(APITestCase):
             user=self.user,
             rejection_reason='recipient_not_found'
         ).exists())
+
+
+class ComplianceAndDeviceChecks(APITestCase):
+    def test_qr_approval_metadata_is_supported(self):
+        sender = User.objects.create_user(
+            email='sender.meta@example.com',
+            google_sub='google_sub_meta',
+            handle='sender_meta',
+            display_name='Sender Meta',
+            status=UserStatus.ACTIVE,
+        )
+        recipient = User.objects.create_user(
+            email='recipient.meta@example.com',
+            google_sub='google_sub_meta_2',
+            handle='recipient_meta',
+            display_name='Recipient Meta',
+            status=UserStatus.ACTIVE,
+        )
+        approval = sender.outgoing_approvals.create(
+            approver=sender,
+            requester=recipient,
+            approval_type='qr_payment',
+            amount=Decimal('50.00'),
+            currency='GNF',
+            metadata={'recipient_id': recipient.id, 'qr_payload': {'type': 'pay'}},
+        )
+        self.assertEqual(approval.metadata['qr_payload']['type'], 'pay')
+
+    def test_kyc_required_before_transfer(self):
+        sender = User.objects.create_user(
+            email='sender.kyc@example.com',
+            google_sub='google_sub_kyc',
+            handle='sender_kyc',
+            display_name='Sender KYC',
+            status=UserStatus.ACTIVE,
+        )
+        sender_wallet = Wallet.objects.create(user=sender, currency='GNF')
+        Transaction.objects.create(
+            type=TransactionType.P2P_TRANSFER,
+            sender=None,
+            recipient=sender,
+            amount=Decimal('5000.00'),
+            currency='GNF',
+            status=TransactionStatus.COMPLETED,
+        )
+        LedgerEntry.objects.create(
+            wallet=sender_wallet,
+            transaction=None,
+            direction=LedgerDirection.CREDIT,
+            amount=Decimal('5000.00'),
+        )
+        recipient = User.objects.create_user(
+            email='recipient.kyc@example.com',
+            google_sub='google_sub_kyc_2',
+            handle='recipient_kyc',
+            display_name='Recipient KYC',
+            status=UserStatus.ACTIVE,
+        )
+        Wallet.objects.create(user=recipient, currency='GNF')
+
+        response = self.client.force_authenticate(user=sender) or self.client.post(
+            '/api/transfers',
+            {
+                'recipient_phone': recipient.primary_phone_number or recipient.email,
+                'amount': '25.00',
+                'currency': 'GNF',
+                'note': 'No KYC transfer',
+                'idempotency_key': 'kyc-required-check',
+            },
+            format='json',
+        )
+        self.assertIn(response.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+
+    def test_single_device_login_rejects_alternate_device(self):
+        user = User.objects.create_user(
+            email='single.device@example.com',
+            google_sub='google_sub_single',
+            handle='singledevice',
+            display_name='Single Device',
+            status=UserStatus.ACTIVE,
+            current_device_id='device-1',
+        )
+        user.set_password('StrongPass123')
+        user.save(update_fields=['password', 'current_device_id'])
+
+        response = self.client.post(
+            '/api/auth/login',
+            {'identifier': 'single.device@example.com', 'password': 'StrongPass123', 'device_id': 'device-2'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
