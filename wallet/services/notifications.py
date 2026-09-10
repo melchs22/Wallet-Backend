@@ -1,5 +1,7 @@
 import logging
+import json
 import os
+from pathlib import Path
 
 from wallet.models import Notification, PushDevice, User
 
@@ -13,6 +15,12 @@ def create_notification_record(user, notification_type, payload):
         'transfer_approval_requested': 'Transfer approval required',
         'payment_request_received': 'Payment request received',
         'split_request_received': 'Split payment requested',
+        'parental_link_requested': 'Parental link approval required',
+        'money_received': 'Money received',
+        'qr_payment_received': 'QR payment received',
+        'payment_request_declined': 'Payment request declined',
+        'parental_link_approved': 'Parental link approved',
+        'parental_link_declined': 'Parental link declined',
         'transfer_received': 'Money received',
         'payment_request_paid': 'Payment request paid',
     }.get(notification_type, 'DSD PAY'))
@@ -33,6 +41,16 @@ def _notification_message(notification_type, payload):
         return f"{payload.get('requester_display_name', 'A user')} requested {amount} {currency}."
     if notification_type == 'split_request_received':
         return f"A split payment request for {amount} {currency} needs your approval."
+    if notification_type == 'parental_link_requested':
+        return f"{payload.get('parent_display_name', 'A parent')} wants to link your account."
+    if notification_type in ('money_received', 'qr_payment_received'):
+        return f"You received {amount} {currency}."
+    if notification_type == 'payment_request_declined':
+        return f"{payload.get('payer_display_name', 'The payer')} declined your request for {amount} {currency}."
+    if notification_type == 'parental_link_approved':
+        return f"{payload.get('child_display_name', 'Your child')} approved the parental link."
+    if notification_type == 'parental_link_declined':
+        return f"{payload.get('child_display_name', 'The child')} declined the parental link."
     if notification_type == 'transfer_received':
         return f"You received {amount} {currency}."
     return 'You have a new wallet update.'
@@ -49,7 +67,10 @@ def deliver_notification(notification_id):
         logger.warning('deliver_notification_missing', extra={'notification_id': notification_id})
         return {'status': 'not_found'}
 
-    if notification.type.startswith(('transfer_', 'payment_request_', 'split_request_', 'wallet_')):
+    if notification.type.startswith((
+        'transfer_', 'payment_request_', 'split_request_', 'parental_',
+        'wallet_', 'money_', 'qr_payment_'
+    )):
         _send_push(notification)
 
     logger.info(
@@ -67,6 +88,7 @@ def _send_push(notification):
     """Send FCM push notifications when Firebase Admin is configured."""
     try:
         import firebase_admin
+        from firebase_admin import credentials
         from firebase_admin import messaging
     except ImportError:
         logger.warning('firebase_admin_not_installed')
@@ -75,11 +97,23 @@ def _send_push(notification):
     try:
         firebase_admin.get_app()
     except ValueError:
-        credential_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-        if not credential_path:
+        credential_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS') or os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH')
+        credential_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
+        if credential_json:
+            try:
+                credential = credentials.Certificate(json.loads(credential_json))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                logger.exception('firebase_credentials_invalid_json')
+                return
+        else:
+            local_credential_path = Path(__file__).resolve().parents[2] / 'dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
+            credential_path = credential_path or (str(local_credential_path) if local_credential_path.exists() else None)
+        if credential_path:
+            credential = credentials.Certificate(credential_path)
+        elif not credential_json:
             logger.warning('firebase_credentials_not_configured')
             return
-        firebase_admin.initialize_app()
+        firebase_admin.initialize_app(credential)
 
     devices = PushDevice.objects.filter(user=notification.user, active=True)
     if not devices.exists():

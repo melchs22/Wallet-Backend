@@ -732,7 +732,7 @@ class ParentalControlSerializer(serializers.ModelSerializer):
     class Meta:
         model = ParentalControl
         fields = [
-            'id', 'parent_email', 'parent_display_name', 'child_email', 'child_display_name',
+            'id', 'parent_id', 'child_id', 'parent_email', 'parent_display_name', 'child_email', 'child_display_name',
             'status', 'can_view_transactions', 'can_control_balance', 'can_send_money', 'can_set_limits',
             'linked_at', 'created_at'
         ]

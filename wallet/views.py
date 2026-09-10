@@ -828,6 +828,11 @@ def create_notification(user, notification_type, payload):
             send_notification_task.delay(notification.id)
         except Exception:
             logger.exception('notification_delivery_dispatch_failed', extra={'notification_id': notification.id})
+            try:
+                from wallet.services.notifications import deliver_notification
+                deliver_notification(notification.id)
+            except Exception:
+                logger.exception('notification_delivery_fallback_failed', extra={'notification_id': notification.id})
 
     transaction.on_commit(dispatch_delivery)
     return notification
@@ -2612,6 +2617,7 @@ def admin_settings_update(request, key):
 )
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def create_payment_request(request):
     """Create a payment request from requester to payer."""
     serializer = PaymentRequestCreateSerializer(data=request.data)
@@ -2784,6 +2790,7 @@ def get_payment_request_detail(request, request_id):
 )
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def pay_payment_request(request, request_id):
     """Pay a payment request (payer accepts)."""
     try:

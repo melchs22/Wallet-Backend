@@ -15,6 +15,7 @@ from .serializers import (
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def link_child_account(request):
     """
     Link a child account by creating an approval request for the child to confirm with PIN.
@@ -31,6 +32,9 @@ def link_child_account(request):
         child = User.objects.get(primary_phone_number=child_phone, status=UserStatus.ACTIVE)
     except User.DoesNotExist:
         return Response({'error': 'User with this phone number not found'}, status=404)
+
+    if request.user.id == child.id:
+        return Response({'error': 'You cannot link your own account as a child'}, status=400)
     
     # Check if already linked
     if ParentalControl.objects.filter(parent=request.user, child=child).exists():
@@ -54,35 +58,37 @@ def link_child_account(request):
             status=202,
         )
     
-    # Create approval request for child to confirm with PIN
-    approval = TransactionApproval.objects.create(
-        approver=child,
-        requester=request.user,
-        approval_type='parental_link',
-        amount=0,
-        currency='GNF',
-        note=f'Parental link request from {request.user.display_name}',
-    )
-    
-    # Create pending parental control (will be activated on approval)
-    parental_control = ParentalControl.objects.create(
-        parent=request.user,
-        child=child,
-        status=ParentalControl.Status.PENDING,
-    )
-    
-    # Notify the child
-    from .views import create_notification
-    create_notification(
-        child,
-        'parental_link_requested',
-        {
-            'approval_id': approval.id,
-            'parent_handle': request.user.handle,
-            'parent_display_name': request.user.display_name,
-            'parental_control_id': parental_control.id,
-        },
-    )
+    with transaction.atomic():
+        # Create approval request for child to confirm with PIN.
+        approval = TransactionApproval.objects.create(
+            approver=child,
+            requester=request.user,
+            approval_type='parental_link',
+            amount=0,
+            currency='GNF',
+            note=f'Parental link request from {request.user.display_name}',
+        )
+
+        # Keep the legacy verification endpoint usable while PIN approval is preferred.
+        parental_control = ParentalControl.objects.create(
+            parent=request.user,
+            child=child,
+            status=ParentalControl.Status.PENDING,
+            verification_code=get_random_string(6, allowed_chars='0123456789'),
+            code_expires_at=timezone.now() + timedelta(minutes=15),
+        )
+
+        from .views import create_notification
+        create_notification(
+            child,
+            'parental_link_requested',
+            {
+                'approval_id': approval.id,
+                'parent_handle': request.user.handle,
+                'parent_display_name': request.user.display_name,
+                'parental_control_id': parental_control.id,
+            },
+        )
     
     return Response({
         'status': 'pending_approval',
@@ -93,6 +99,7 @@ def link_child_account(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def verify_parental_link(request, control_id):
     """
     Verify a parental control link using the 6-digit code.
@@ -106,7 +113,7 @@ def verify_parental_link(request, control_id):
     
     try:
         # User can verify if they are the parent or the child
-        parental_control = ParentalControl.objects.get(
+        parental_control = ParentalControl.objects.select_for_update().get(
             id=control_id,
             verification_code=verification_code,
             status=ParentalControl.Status.PENDING
@@ -127,6 +134,27 @@ def verify_parental_link(request, control_id):
     parental_control.status = ParentalControl.Status.ACTIVE
     parental_control.linked_at = timezone.now()
     parental_control.save()
+
+    from .models import TransactionApproval
+    approval = TransactionApproval.objects.filter(
+        requester=parental_control.parent,
+        approver=parental_control.child,
+        approval_type='parental_link',
+        status=TransactionApproval.ApprovalStatus.PENDING,
+    ).order_by('-created_at').first()
+    if approval:
+        approval.status = TransactionApproval.ApprovalStatus.APPROVED
+        approval.responded_at = timezone.now()
+        approval.save(update_fields=['status', 'responded_at'])
+    from .views import create_notification
+    create_notification(
+        parental_control.parent,
+        'parental_link_approved',
+        {
+            'child_display_name': parental_control.child.display_name,
+            'parental_control_id': parental_control.id,
+        },
+    )
     
     serializer = ParentalControlSerializer(parental_control)
     return Response(serializer.data)
@@ -232,6 +260,7 @@ def send_to_child(request, child_id):
     
     amount = request.data.get('amount')
     note = request.data.get('note', '')
+    idempotency_key = request.data.get('idempotency_key')
     
     if not amount:
         return Response({'error': 'Amount is required'}, status=400)
@@ -252,7 +281,8 @@ def send_to_child(request, child_id):
             recipient=parental_control.child,
             amount=Decimal(amount),
             currency=parent_wallet.currency,
-            note=f"Parental transfer: {note}" if note else "Parental transfer"
+            note=f"Parental transfer: {note}" if note else "Parental transfer",
+            idempotency_key=idempotency_key,
         )
         
         return Response({

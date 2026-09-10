@@ -2,6 +2,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.utils import timezone
+from django.db import transaction
 from django.contrib.auth.hashers import check_password, make_password
 from .models import PaymentRequestStatus, TransactionApproval, ParentalControl
 from .serializers import TransactionApprovalSerializer, PinVerifySerializer
@@ -22,6 +23,7 @@ def list_pending_approvals(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def approve_transaction(request, approval_id):
     """Approve a pending transaction approval with PIN verification."""
     # Verify PIN
@@ -44,7 +46,7 @@ def approve_transaction(request, approval_id):
             return Response({'error': 'Incorrect PIN'}, status=400)
     
     try:
-        approval = TransactionApproval.objects.get(
+        approval = TransactionApproval.objects.select_for_update().get(
             id=approval_id,
             approver=request.user,
             status=TransactionApproval.ApprovalStatus.PENDING
@@ -111,6 +113,15 @@ def approve_transaction(request, approval_id):
             parental_control.status = ParentalControl.Status.ACTIVE
             parental_control.linked_at = timezone.now()
             parental_control.save()
+            from .views import create_notification
+            create_notification(
+                approval.requester,
+                'parental_link_approved',
+                {
+                    'child_display_name': approval.approver.display_name,
+                    'parental_control_id': parental_control.id,
+                },
+            )
         approval.status = TransactionApproval.ApprovalStatus.APPROVED
         approval.responded_at = timezone.now()
         approval.save(update_fields=['status', 'responded_at'])
@@ -212,6 +223,7 @@ def approve_transaction(request, approval_id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def decline_transaction(request, approval_id):
     """Decline a pending transaction approval with PIN verification."""
     # Verify PIN
@@ -234,7 +246,7 @@ def decline_transaction(request, approval_id):
             return Response({'error': 'Incorrect PIN'}, status=400)
     
     try:
-        approval = TransactionApproval.objects.get(
+        approval = TransactionApproval.objects.select_for_update().get(
             id=approval_id,
             approver=request.user,
             status=TransactionApproval.ApprovalStatus.PENDING
@@ -250,11 +262,34 @@ def decline_transaction(request, approval_id):
     if approval.payment_request:
         approval.payment_request.status = PaymentRequestStatus.DECLINED
         approval.payment_request.save()
+        from .views import create_notification
+        create_notification(
+            approval.requester,
+            'payment_request_declined',
+            {
+                'payer_display_name': approval.approver.display_name,
+                'amount': str(approval.amount),
+                'currency': approval.currency,
+                'payment_request_id': approval.payment_request_id,
+            },
+        )
     elif approval.split_request:
         participant = approval.split_request.participants.filter(payment_request__payer=request.user).first()
         if participant:
             participant.status = 'declined'
             participant.save()
+    elif approval.approval_type == 'parental_link':
+        ParentalControl.objects.filter(
+            parent=approval.requester,
+            child=approval.approver,
+            status=ParentalControl.Status.PENDING,
+        ).update(status=ParentalControl.Status.REVOKED)
+        from .views import create_notification
+        create_notification(
+            approval.requester,
+            'parental_link_declined',
+            {'child_display_name': approval.approver.display_name},
+        )
     
     serializer = TransactionApprovalSerializer(approval)
     return Response(serializer.data)
