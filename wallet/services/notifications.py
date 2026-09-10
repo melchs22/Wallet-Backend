@@ -23,6 +23,7 @@ def create_notification_record(user, notification_type, payload):
         'parental_link_declined': 'Parental link declined',
         'transfer_received': 'Money received',
         'payment_request_paid': 'Payment request paid',
+        'payment_request_expired': 'Payment request expired',
     }.get(notification_type, 'DSD PAY'))
     payload.setdefault('message', _notification_message(notification_type, payload))
     return Notification.objects.create(
@@ -47,6 +48,8 @@ def _notification_message(notification_type, payload):
         return f"You received {amount} {currency}."
     if notification_type == 'payment_request_declined':
         return f"{payload.get('payer_display_name', 'The payer')} declined your request for {amount} {currency}."
+    if notification_type == 'payment_request_expired':
+        return f"Your request for {amount} {currency} expired. Send a new request if you still need payment."
     if notification_type == 'parental_link_approved':
         return f"{payload.get('child_display_name', 'Your child')} approved the parental link."
     if notification_type == 'parental_link_declined':

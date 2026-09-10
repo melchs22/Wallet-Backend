@@ -8,7 +8,7 @@ import uuid
 
 
 def default_request_expiry():
-    return timezone.now() + timedelta(days=7)
+    return timezone.now() + timedelta(minutes=2)
 
 
 def default_payment_intent_expiry():
@@ -127,6 +127,35 @@ class UserStatus(models.TextChoices):
     ACTIVE = 'active', 'Active'
     SUSPENDED = 'suspended', 'Suspended'
     CLOSED = 'closed', 'Closed'
+
+
+class SupportedCountry(models.Model):
+    code = models.CharField(max_length=2, unique=True)
+    name = models.CharField(max_length=100)
+    dial_code = models.CharField(max_length=8)
+    flag = models.CharField(max_length=8, blank=True, default='')
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return f'{self.name} ({self.dial_code})'
+
+
+class LegalDocument(models.Model):
+    slug = models.SlugField(unique=True)
+    title = models.CharField(max_length=200)
+    body_html = models.TextField()
+    published = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['slug']
+
+    def __str__(self):
+        return self.title
 
 
 class WalletStatus(models.TextChoices):
@@ -585,6 +614,54 @@ class LinkedProvider(models.Model):
             models.Index(fields=['user', 'provider']),
             models.Index(fields=['verification_status']),
         ]
+
+
+class ProviderCatalog(models.Model):
+    code = models.CharField(max_length=30, unique=True)
+    name = models.CharField(max_length=100)
+    logo_url = models.URLField(blank=True, default='')
+    active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['sort_order', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+class TransferFeeRule(models.Model):
+    class FeeType(models.TextChoices):
+        FLAT = 'flat', 'Flat amount'
+        PERCENTAGE = 'percentage', 'Percentage'
+
+    min_amount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('0.00'))
+    max_amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    fee_type = models.CharField(max_length=20, choices=FeeType.choices, default=FeeType.PERCENTAGE)
+    fee_value = models.DecimalField(max_digits=20, decimal_places=4, default=Decimal('0.00'))
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['min_amount']
+
+
+class UserKYCSubmission(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='kyc_submissions')
+    document_type = models.CharField(max_length=40)
+    document = models.FileField(upload_to='kyc/users/')
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    reviewer_notes = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='user_kyc_reviews')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
 
 
 class ExchangeRate(models.Model):

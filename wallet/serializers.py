@@ -6,7 +6,7 @@ from .models import (
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant,
-    LinkedProvider, ExchangeRate, Dispute, DisputeStatus, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, SystemSetting, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, TransactionApproval, ParentalControl
+    LinkedProvider, ProviderCatalog, ExchangeRate, Dispute, DisputeStatus, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, SystemSetting, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, TransactionApproval, ParentalControl, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission
 )
 from django.db import transaction
 from django.utils.text import slugify
@@ -51,11 +51,57 @@ class EmailSignupSerializer(serializers.Serializer):
     phone_number = serializers.CharField(required=False, allow_blank=True, max_length=30)
     primary_phone_number = serializers.CharField(required=False, allow_blank=True, max_length=30)
     transaction_pin = serializers.RegexField(regex=r'^\d{4}$', write_only=True, required=True, help_text="4-digit PIN for transaction approvals")
+    confirm_password = serializers.CharField(write_only=True, min_length=8)
+    terms_accepted = serializers.BooleanField(write_only=True)
+    country_code = serializers.CharField(required=False, allow_blank=True, max_length=2)
+
+    def validate(self, attrs):
+        if attrs['password'] != attrs['confirm_password']:
+            raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
+        if not attrs['terms_accepted']:
+            raise serializers.ValidationError({'terms_accepted': 'You must accept the terms and conditions.'})
+        return attrs
 
 
 class EmailLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['confirm_password']:
+            raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
+        return attrs
+
+
+class SupportedCountrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportedCountry
+        fields = ['code', 'name', 'dial_code', 'flag']
+
+
+class LegalDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LegalDocument
+        fields = ['slug', 'title', 'body_html', 'updated_at']
+
+
+class ProviderCatalogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProviderCatalog
+        fields = ['code', 'name', 'logo_url']
+
+
+class UserKYCSubmissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserKYCSubmission
+        fields = ['id', 'document_type', 'document', 'status', 'reviewer_notes', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'status', 'reviewer_notes', 'created_at', 'updated_at']
 
 
 class GoogleAuthResponseSerializer(serializers.Serializer):

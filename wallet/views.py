@@ -10,8 +10,10 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
 from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 import requests
 from google.oauth2 import id_token
@@ -26,7 +28,7 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
-    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
@@ -43,7 +45,9 @@ from .serializers import (
     MobileMoneyTransactionSerializer, MobileMoneyTopupSerializer, MobileMoneyWithdrawalSerializer,
     ScheduledTransferSerializer, ScheduledTransferCreateSerializer,
     MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer,
-    MerchantPlanSerializer, MerchantSubscriptionSerializer
+    MerchantPlanSerializer, MerchantSubscriptionSerializer, ChangePasswordSerializer,
+    SupportedCountrySerializer, LegalDocumentSerializer, ProviderCatalogSerializer,
+    UserKYCSubmissionSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -145,6 +149,10 @@ class EmailSignupView(APIView):
         phone_number = serializer.validated_data.get('phone_number', '').strip()
         primary_phone_number = serializer.validated_data.get('primary_phone_number', phone_number).strip()
         transaction_pin = serializer.validated_data.get('transaction_pin', '').strip()
+        country_code = serializer.validated_data.get('country_code', '').strip().upper()
+
+        if country_code and not SupportedCountry.objects.filter(code=country_code, active=True).exists():
+            return Response({'error': 'This country is not currently supported.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if User.objects.filter(email__iexact=email).exists():
             return Response({'error': 'An account with this email already exists.'}, status=status.HTTP_409_CONFLICT)
@@ -190,6 +198,67 @@ class EmailSignupView(APIView):
         }
         request.session.save()
         return Response(response_data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def supported_countries(request):
+    return Response(SupportedCountrySerializer(SupportedCountry.objects.filter(active=True), many=True).data)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def legal_document(request, slug):
+    try:
+        document = LegalDocument.objects.get(slug=slug, published=True)
+    except LegalDocument.DoesNotExist:
+        return Response({'error': 'Document not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(LegalDocumentSerializer(document).data)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def legal_document_html(request, slug):
+    try:
+        document = LegalDocument.objects.get(slug=slug, published=True)
+    except LegalDocument.DoesNotExist:
+        return HttpResponse('<h1>Document not found</h1>', status=404, content_type='text/html')
+    return HttpResponse(document.body_html, content_type='text/html')
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def provider_catalog(request):
+    return Response(ProviderCatalogSerializer(ProviderCatalog.objects.filter(active=True), many=True).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    serializer = ChangePasswordSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    if not request.user.check_password(serializer.validated_data['old_password']):
+        return Response({'error': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+    request.user.set_password(serializer.validated_data['new_password'])
+    request.user.save(update_fields=['password'])
+    return Response({'message': 'Password changed successfully.'})
+
+
+class UserKYCSubmissionView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request):
+        submissions = UserKYCSubmission.objects.filter(user=request.user)
+        return Response(UserKYCSubmissionSerializer(submissions, many=True).data)
+
+    def post(self, request):
+        serializer = UserKYCSubmissionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        submission = serializer.save(user=request.user)
+        return Response(UserKYCSubmissionSerializer(submission).data, status=status.HTTP_201_CREATED)
 
 
 @method_decorator(csrf_exempt, name='dispatch')

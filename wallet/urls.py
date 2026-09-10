@@ -20,7 +20,9 @@ from .views import (
     pause_scheduled_transfer, resume_scheduled_transfer, cancel_scheduled_transfer,
     create_merchant_account, get_merchant_account, generate_merchant_qr,
     merchant_dashboard, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
-    merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant
+    merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant,
+    supported_countries, legal_document, legal_document_html, provider_catalog,
+    change_password, UserKYCSubmissionView
 )
 from .approval_views import list_pending_approvals, approve_transaction, decline_transaction
 from .parental_views import (
@@ -33,6 +35,12 @@ urlpatterns = [
     path('auth/google', GoogleAuthView.as_view(), name='google_auth'),
     path('auth/signup', EmailSignupView.as_view(), name='email_signup'),
     path('auth/login', EmailLoginView.as_view(), name='email_login'),
+    path('auth/change-password', change_password, name='change_password'),
+    path('countries', supported_countries, name='supported_countries'),
+    path('legal/<slug:slug>', legal_document, name='legal_document'),
+    path('legal/<slug:slug>/html', legal_document_html, name='legal_document_html'),
+    path('mobile-money/provider-catalog', provider_catalog, name='provider_catalog'),
+    path('kyc/submissions', UserKYCSubmissionView.as_view(), name='user_kyc_submissions'),
     path('auth/admin', AdminLoginView.as_view(), name='admin_login'),
     path('admin/auth/login', admin_auth_login, name='admin_auth_login'),
     path('admin/auth/logout', admin_auth_logout, name='admin_auth_logout'),

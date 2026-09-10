@@ -12,7 +12,7 @@ PERIODIC_TASKS = [
     {
         'name': 'expire_payment_requests',
         'task': 'wallet.tasks.expire_payment_requests_task',
-        'interval': {'every': 10, 'period': IntervalSchedule.MINUTES},
+        'interval': {'every': 1, 'period': IntervalSchedule.MINUTES},
         'description': 'Mark payment requests past expires_at as expired',
     },
     {

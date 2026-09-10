@@ -9,7 +9,43 @@ from .models import (
     LinkedProvider, ExchangeRate, Dispute, PaymentRequest, SplitRequest, SystemSetting,
     MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
     PushDevice,
+    SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission,
 )
+
+
+@admin.register(SupportedCountry)
+class SupportedCountryAdmin(admin.ModelAdmin):
+    list_display = ['flag', 'name', 'code', 'dial_code', 'active']
+    list_filter = ['active']
+    search_fields = ['name', 'code']
+
+
+@admin.register(LegalDocument)
+class LegalDocumentAdmin(admin.ModelAdmin):
+    list_display = ['title', 'slug', 'published', 'updated_at']
+    list_filter = ['published']
+    prepopulated_fields = {'slug': ('title',)}
+
+
+@admin.register(ProviderCatalog)
+class ProviderCatalogAdmin(admin.ModelAdmin):
+    list_display = ['name', 'code', 'active', 'sort_order']
+    list_filter = ['active']
+    search_fields = ['name', 'code']
+
+
+@admin.register(TransferFeeRule)
+class TransferFeeRuleAdmin(admin.ModelAdmin):
+    list_display = ['min_amount', 'max_amount', 'fee_type', 'fee_value', 'active']
+    list_filter = ['fee_type', 'active']
+
+
+@admin.register(UserKYCSubmission)
+class UserKYCSubmissionAdmin(admin.ModelAdmin):
+    list_display = ['user', 'document_type', 'status', 'created_at', 'updated_at']
+    list_filter = ['status', 'document_type']
+    search_fields = ['user__email', 'user__handle']
+    readonly_fields = ['user', 'document', 'created_at', 'updated_at']
 
 
 @admin.register(User)
