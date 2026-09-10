@@ -776,6 +776,7 @@ class MobileMoneyTransaction(models.Model):
         choices=MobileMoneyTransactionType.choices
     )
     amount = models.DecimalField(max_digits=20, decimal_places=2)
+    fee_amount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('0.00'))
     currency = models.CharField(max_length=3)
     status = models.CharField(
         max_length=20,

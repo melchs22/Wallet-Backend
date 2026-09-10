@@ -925,7 +925,7 @@ def resolve_user_by_phone(request):
 
 def create_notification(user, notification_type, payload):
     """
-    Create a notification for a user synchronously, then queue delivery async.
+    Create and deliver a notification after the current transaction commits.
     """
     from wallet.services.notifications import create_notification_record
 
@@ -933,15 +933,10 @@ def create_notification(user, notification_type, payload):
 
     def dispatch_delivery():
         try:
-            from wallet.tasks import send_notification_task
-            send_notification_task.delay(notification.id)
+            from wallet.services.notifications import deliver_notification
+            deliver_notification(notification.id)
         except Exception:
-            logger.exception('notification_delivery_dispatch_failed', extra={'notification_id': notification.id})
-            try:
-                from wallet.services.notifications import deliver_notification
-                deliver_notification(notification.id)
-            except Exception:
-                logger.exception('notification_delivery_fallback_failed', extra={'notification_id': notification.id})
+            logger.exception('notification_delivery_failed', extra={'notification_id': notification.id})
 
     transaction.on_commit(dispatch_delivery)
     return notification
@@ -1528,6 +1523,9 @@ class NotificationListView(APIView):
 
     def get(self, request):
         unread_only = request.query_params.get('unread_only', 'false').lower() == 'true'
+
+        from wallet.services.notifications import remove_expired_approval_notifications
+        remove_expired_approval_notifications(request.user)
         
         notifications = request.user.notifications.all()
         
@@ -1597,6 +1595,12 @@ class TransactionListView(APIView):
         # Get transactions where user is sender or recipient
         transactions = request.user.sent_transactions.all() | request.user.received_transactions.all()
         transactions = transactions.distinct().order_by('-created_at')
+        since = request.query_params.get('since')
+        until = request.query_params.get('until')
+        if since:
+            transactions = transactions.filter(created_at__date__gte=since)
+        if until:
+            transactions = transactions.filter(created_at__date__lte=until)
         
         # Apply cursor pagination
         paginator = CursorPagination()
@@ -2743,6 +2747,8 @@ def create_payment_request(request):
     payer_phone = serializer.validated_data['payer_phone']
     amount = serializer.validated_data['amount']
     currency = serializer.validated_data['currency']
+    from wallet.services.fees import resolve_withdrawal_fee
+    fee_amount, _ = resolve_withdrawal_fee(amount, currency)
     note = serializer.validated_data.get('note', '')
     
     try:
@@ -4392,7 +4398,7 @@ def mobile_money_withdrawal(request):
 
             # Check balance
             current_balance = wallet.get_balance()
-            if current_balance < amount:
+            if current_balance < amount + fee_amount:
                 return Response(
                     {'error': 'Insufficient balance'},
                     status=status.HTTP_400_BAD_REQUEST
@@ -4405,6 +4411,7 @@ def mobile_money_withdrawal(request):
                 linked_provider=linked_provider,
                 type=MobileMoneyTransactionType.WITHDRAWAL,
                 amount=amount,
+                fee_amount=fee_amount,
                 currency=currency,
                 status=MobileMoneyTransactionStatus.PENDING
             )
@@ -4424,7 +4431,7 @@ def mobile_money_withdrawal(request):
                 wallet=wallet,
                 transaction=None,  # Will be updated when completed
                 direction=LedgerDirection.DEBIT,
-                amount=amount
+                amount=amount + fee_amount
             )
 
             # Audit log

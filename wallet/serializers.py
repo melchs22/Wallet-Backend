@@ -622,7 +622,7 @@ class MobileMoneyTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = MobileMoneyTransaction
         fields = [
-            'id', 'user', 'wallet', 'linked_provider', 'type', 'amount', 'currency',
+            'id', 'user', 'wallet', 'linked_provider', 'type', 'amount', 'fee_amount', 'currency',
             'status', 'provider_transaction_id', 'provider_reference', 'provider_response',
             'failure_reason', 'created_at', 'updated_at', 'completed_at'
         ]
@@ -761,6 +761,7 @@ class TransactionApprovalSerializer(serializers.ModelSerializer):
     requester_handle = serializers.CharField(source='requester.handle', read_only=True)
     requester_display_name = serializers.CharField(source='requester.display_name', read_only=True)
     requester_phone = serializers.CharField(source='requester.primary_phone_number', read_only=True)
+    requester_phone_last4 = serializers.SerializerMethodField()
     approver_handle = serializers.CharField(source='approver.handle', read_only=True)
     approver_display_name = serializers.CharField(source='approver.display_name', read_only=True)
     
@@ -769,11 +770,17 @@ class TransactionApprovalSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'approval_type', 'status', 'amount', 'currency', 'note',
             'requester_handle', 'requester_display_name', 'requester_phone',
+            'requester_phone_last4',
             'approver_handle', 'approver_display_name',
             'transaction_id', 'payment_request_id', 'split_request_id',
             'expires_at', 'created_at'
         ]
         read_only_fields = fields
+
+    def get_requester_phone_last4(self, obj):
+        phone = (obj.requester.primary_phone_number or obj.requester.phone_number or '').strip()
+        digits = ''.join(character for character in phone if character.isdigit())
+        return digits[-4:] if len(digits) >= 4 else digits
 
 
 class ParentalControlSerializer(serializers.ModelSerializer):

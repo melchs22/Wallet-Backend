@@ -12,6 +12,14 @@ from .serializers import TransactionApprovalSerializer, PinVerifySerializer
 @permission_classes([IsAuthenticated])
 def list_pending_approvals(request):
     """List all pending approvals for the current user."""
+    now = timezone.now()
+    TransactionApproval.objects.filter(
+        approver=request.user,
+        status=TransactionApproval.ApprovalStatus.PENDING,
+        expires_at__lt=now,
+    ).update(status=TransactionApproval.ApprovalStatus.EXPIRED)
+    from .services.notifications import remove_expired_approval_notifications
+    remove_expired_approval_notifications(request.user)
     approvals = TransactionApproval.objects.filter(
         approver=request.user,
         status=TransactionApproval.ApprovalStatus.PENDING

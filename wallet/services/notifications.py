@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 
-from wallet.models import Notification, PushDevice, User
+from wallet.models import Notification, PushDevice, TransactionApproval, User
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,25 @@ def deliver_notification(notification_id):
         },
     )
     return {'status': 'delivered', 'notification_id': notification_id}
+
+
+def remove_expired_approval_notifications(user=None):
+    """Remove unread approval prompts that can no longer be acted on."""
+    expired_ids = list(TransactionApproval.objects.filter(
+        status__in=[
+            TransactionApproval.ApprovalStatus.EXPIRED,
+            TransactionApproval.ApprovalStatus.APPROVED,
+            TransactionApproval.ApprovalStatus.DECLINED,
+        ],
+    ).values_list('id', flat=True))
+    notifications = Notification.objects.filter(
+        type__in=['transfer_approval_requested', 'payment_request_received', 'split_request_received'],
+        read_at__isnull=True,
+        payload__approval_id__in=expired_ids,
+    )
+    if user is not None:
+        notifications = notifications.filter(user=user)
+    return notifications.delete()[0]
 
 
 def _send_push(notification):

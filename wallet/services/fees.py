@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.db.models import Q
 from django.utils import timezone
 
-from wallet.models import FeeAppliesTo, FeePolicy, FeeWaiver, Merchant, User
+from wallet.models import FeeAppliesTo, FeePolicy, FeeWaiver, Merchant, TransferFeeRule, User
 
 
 def get_platform_wallet(currency='GNF', is_sandbox=False):
@@ -67,6 +67,20 @@ def _calculate_fee(amount, policy):
     if policy.fee_percent:
         fee += (amount * policy.fee_percent / Decimal('100')).quantize(Decimal('0.01'))
     return fee
+
+
+def resolve_withdrawal_fee(amount, currency='GNF'):
+    """Resolve the admin-editable amount-band fee schedule for withdrawals."""
+    if currency != 'GNF':
+        return Decimal('0.00'), None
+    rule = TransferFeeRule.objects.filter(active=True, min_amount__lte=amount).filter(
+        Q(max_amount__isnull=True) | Q(max_amount__gte=amount)
+    ).order_by('-min_amount').first()
+    if not rule:
+        return Decimal('0.00'), None
+    if rule.fee_type == TransferFeeRule.FeeType.FLAT:
+        return rule.fee_value.quantize(Decimal('0.01')), rule
+    return (amount * rule.fee_value / Decimal('100')).quantize(Decimal('0.01')), rule
 
 
 def preview_merchant_transfer_fee(amount, merchant_id, currency='GNF'):
