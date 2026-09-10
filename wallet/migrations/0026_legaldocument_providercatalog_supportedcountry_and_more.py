@@ -15,7 +15,7 @@ def seed_configuration(apps, schema_editor):
         ('GN', 'Guinea', '+224'), ('SN', 'Senegal', '+221'), ('CI', 'Cote d Ivoire', '+225'),
         ('GH', 'Ghana', '+233'), ('NG', 'Nigeria', '+234'), ('KE', 'Kenya', '+254'),
     ]:
-        SupportedCountry.objects.get_or_create(code=code, defaults={'name': name, 'dial_code': dial_code})
+        SupportedCountry.objects.get_or_create(code=code, defaults={'name': name, 'dial_code': dial_code, 'active': False})
     LegalDocument.objects.get_or_create(
         slug='terms-and-conditions',
         defaults={'title': 'Terms and Conditions', 'body_html': '<h1>Terms and Conditions</h1><p>Use of DSD PAY is subject to these terms.</p>'},
@@ -32,7 +32,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(seed_configuration, migrations.RunPython.noop),
         migrations.CreateModel(
             name='LegalDocument',
             fields=[
@@ -106,4 +105,5 @@ class Migration(migrations.Migration):
                 'ordering': ['-created_at'],
             },
         ),
+        migrations.RunPython(seed_configuration, migrations.RunPython.noop),
     ]
