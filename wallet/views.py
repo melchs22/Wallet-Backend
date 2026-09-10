@@ -302,7 +302,7 @@ class EmailLoginView(APIView):
             if user is not None and not user.check_password(password):
                 user = None
         if user is None:
-            return Response({'error': 'Invalid email or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({'error': 'Invalid email/phone or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         if user.status != UserStatus.ACTIVE:
             return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
