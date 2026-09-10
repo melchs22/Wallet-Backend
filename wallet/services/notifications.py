@@ -75,7 +75,7 @@ def deliver_notification(notification_id):
 
     if notification.type.startswith((
         'transfer_', 'payment_request_', 'split_request_', 'parental_',
-        'wallet_', 'money_', 'qr_payment_'
+        'wallet_', 'money_', 'qr_payment_', 'device_signed_in_elsewhere'
     )):
         _send_push(notification)
 
