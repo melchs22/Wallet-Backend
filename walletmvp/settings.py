@@ -191,11 +191,11 @@ REST_FRAMEWORK = {
     # Removed DEFAULT_PERMISSION_CLASSES to allow explicit permission per view
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
-        'rest_framework.throttling.UserRateThrottle'
+        'wallet.throttles.SustainableUserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/day',
-        'user': '1000/day',
+        'user': os.getenv('USER_API_RATE', '1200/minute'),
         'merchant_api': '1000/hour',
     },
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
@@ -284,9 +284,18 @@ GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 QR_SIGNING_SECRET = os.getenv('QR_SIGNING_SECRET', 'change-this-qr-secret-in-production-12345')
 
 # Celery + Redis
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', REDIS_URL)
+REDIS_URL = os.getenv('REDIS_URL')
+if REDIS_URL and not TESTING:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+        },
+    }
+
+CELERY_REDIS_URL = REDIS_URL or 'redis://localhost:6379/0'
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', CELERY_REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_REDIS_URL)
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
