@@ -6,6 +6,44 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def add_push_device_id_if_missing(apps, schema_editor):
+    push_device = apps.get_model('wallet', 'PushDevice')
+    table_name = push_device._meta.db_table
+    columns = {
+        column.name
+        for column in schema_editor.connection.introspection.get_table_description(
+            schema_editor.connection.cursor(),
+            table_name,
+        )
+    }
+    if 'device_id' not in columns:
+        field = models.CharField(
+            name='device_id',
+            max_length=255,
+            blank=True,
+            default='',
+            db_index=True,
+        )
+        field.contribute_to_class(push_device, 'device_id')
+        schema_editor.add_field(push_device, field)
+
+
+def remove_push_device_id(apps, schema_editor):
+    push_device = apps.get_model('wallet', 'PushDevice')
+    table_name = push_device._meta.db_table
+    columns = {
+        column.name
+        for column in schema_editor.connection.introspection.get_table_description(
+            schema_editor.connection.cursor(),
+            table_name,
+        )
+    }
+    if 'device_id' in columns:
+        field = models.CharField(name='device_id', max_length=255, db_index=True)
+        field.contribute_to_class(push_device, 'device_id')
+        schema_editor.remove_field(push_device, field)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -29,10 +67,17 @@ class Migration(migrations.Migration):
                 'ordering': ['-received_at'],
             },
         ),
-        migrations.AddField(
-            model_name='pushdevice',
-            name='device_id',
-            field=models.CharField(blank=True, db_index=True, default='', max_length=255),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(add_push_device_id_if_missing, remove_push_device_id),
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name='pushdevice',
+                    name='device_id',
+                    field=models.CharField(blank=True, db_index=True, default='', max_length=255),
+                ),
+            ],
         ),
         migrations.CreateModel(
             name='TrustedDevice',
