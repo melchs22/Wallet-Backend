@@ -1215,3 +1215,70 @@ class TransactionApproval(models.Model):
             models.Index(fields=['requester', 'status', 'created_at']),
             models.Index(fields=['status', 'expires_at']),
         ]
+
+
+class SupportTicketStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    IN_PROGRESS = 'in_progress', 'In Progress'
+    WAITING_ON_USER = 'waiting_on_user', 'Waiting on User'
+    RESOLVED = 'resolved', 'Resolved'
+    CLOSED = 'closed', 'Closed'
+
+
+class SupportTicketPriority(models.TextChoices):
+    LOW = 'low', 'Low'
+    MEDIUM = 'medium', 'Medium'
+    HIGH = 'high', 'High'
+    URGENT = 'urgent', 'Urgent'
+
+
+class SupportTicketCategory(models.TextChoices):
+    BILLING = 'billing', 'Billing & Top-ups'
+    TRANSFER = 'transfer', 'Transfer Issues'
+    ACCOUNT = 'account', 'Account & Access'
+    KYC = 'kyc', 'KYC & Verification'
+    FRAUD = 'fraud', 'Security & Fraud'
+    GENERAL = 'general', 'General Inquiry'
+
+
+class SupportTicket(models.Model):
+    ticket_number = models.CharField(max_length=30, unique=True, db_index=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='support_tickets')
+    assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_support_tickets')
+    subject = models.CharField(max_length=255)
+    category = models.CharField(max_length=30, choices=SupportTicketCategory.choices, default=SupportTicketCategory.GENERAL)
+    priority = models.CharField(max_length=20, choices=SupportTicketPriority.choices, default=SupportTicketPriority.MEDIUM)
+    status = models.CharField(max_length=20, choices=SupportTicketStatus.choices, default=SupportTicketStatus.OPEN)
+    related_transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='support_tickets')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'support_tickets'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['status', 'priority']),
+            models.Index(fields=['assigned_to', 'status']),
+            models.Index(fields=['user', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.ticket_number} - {self.subject}"
+
+
+class SupportTicketMessage(models.Model):
+    ticket = models.ForeignKey(SupportTicket, on_delete=models.CASCADE, related_name='messages')
+    sender = models.ForeignKey(User, on_delete=models.CASCADE)
+    is_internal_note = models.BooleanField(default=False, help_text="Visible only to staff")
+    message = models.TextField()
+    attachment_url = models.URLField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'support_ticket_messages'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"Msg on {self.ticket.ticket_number} by {self.sender.handle}"
+

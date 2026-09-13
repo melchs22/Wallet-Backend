@@ -29,6 +29,8 @@ from .parental_views import (
     link_child_account, verify_parental_link, list_child_accounts, list_parent_accounts,
     get_child_balance, get_child_transactions, send_to_child, update_parental_permissions, revoke_parental_control
 )
+from . import admin_views
+
 
 urlpatterns = [
     # Authentication
@@ -99,6 +101,7 @@ urlpatterns = [
     path('admin/users/<int:user_id>', admin_user_detail, name='admin_user_detail'),
     path('admin/users/<int:user_id>/update', admin_user_update, name='admin_user_update'),
     path('admin/users/<int:user_id>/topup', admin_topup_user, name='admin_user_topup'),
+    path('admin/users/<int:user_id>/freeze-wallet', admin_views.admin_user_freeze_wallet, name='admin_user_freeze_wallet'),
     path('admin/transactions', admin_transactions_list, name='admin_transactions_list'),
     path('admin/transactions/<str:transaction_id>', admin_transaction_detail, name='admin_transaction_detail'),
     path('admin/transactions/<str:transaction_id>/reverse', ReversalView.as_view(), name='admin_transaction_reverse'),
@@ -110,6 +113,39 @@ urlpatterns = [
     path('admin/settings/<str:key>', admin_settings_update, name='admin_settings_update'),
     path('admin/reconciliation/last-run', admin_reconciliation_last_run, name='admin_reconciliation_last_run'),
     path('admin/reconciliation/run', admin_reconciliation_run, name='admin_reconciliation_run'),
+    
+    # Task Operations & Monitoring
+    path('admin/tasks/periodic', admin_views.admin_periodic_tasks_list, name='admin_periodic_tasks_list'),
+    path('admin/tasks/periodic/<int:task_id>/toggle', admin_views.admin_periodic_task_toggle, name='admin_periodic_task_toggle'),
+    path('admin/tasks/periodic/<int:task_id>/run-now', admin_views.admin_periodic_task_run_now, name='admin_periodic_task_run_now'),
+
+    # Support Ticket System
+    path('admin/support/tickets', admin_views.admin_support_tickets_list, name='admin_support_tickets_list'),
+    path('admin/support/tickets/create', admin_views.admin_support_ticket_create, name='admin_support_ticket_create'),
+    path('admin/support/tickets/<int:ticket_id>', admin_views.admin_support_ticket_detail, name='admin_support_ticket_detail'),
+    path('admin/support/tickets/<int:ticket_id>/update', admin_views.admin_support_ticket_update, name='admin_support_ticket_update'),
+    path('admin/support/tickets/<int:ticket_id>/messages', admin_views.admin_support_ticket_add_message, name='admin_support_ticket_add_message'),
+    path('admin/support/metrics', admin_views.admin_support_metrics, name='admin_support_metrics'),
+
+    # KYC & Compliance Review
+    path('admin/kyc/user-submissions', admin_views.admin_user_kyc_list, name='admin_user_kyc_list'),
+    path('admin/kyc/user-submissions/<int:submission_id>/review', admin_views.admin_user_kyc_review, name='admin_user_kyc_review'),
+
+    # Mobile Money & Webhook Operations
+    path('admin/mobile-money/transactions', admin_views.admin_mobile_money_list, name='admin_mobile_money_list'),
+    path('admin/mobile-money/transactions/<int:transaction_id>/retry', admin_views.admin_mobile_money_retry, name='admin_mobile_money_retry'),
+    path('admin/merchants/webhooks/failed', admin_views.admin_failed_webhooks_list, name='admin_failed_webhooks_list'),
+    path('admin/merchants/webhooks/<int:delivery_id>/retry', admin_views.admin_webhook_retry, name='admin_webhook_retry'),
+
+    # Financial & FX Control
+    path('admin/finance/fee-rules', admin_views.admin_fee_rules_list_create, name='admin_fee_rules_list_create'),
+    path('admin/finance/fee-waivers', admin_views.admin_fee_waiver_create, name='admin_fee_waiver_create'),
+    path('admin/finance/exchange-rates', admin_views.admin_exchange_rates_list, name='admin_exchange_rates_list'),
+    path('admin/finance/exchange-rates/refresh', admin_views.admin_exchange_rates_refresh, name='admin_exchange_rates_refresh'),
+
+    # Admin Team Management
+    path('admin/team', admin_views.admin_team_list, name='admin_team_list'),
+
     
     # Disputes
     path('disputes/create', create_dispute, name='create_dispute'),
