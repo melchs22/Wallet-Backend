@@ -37,7 +37,7 @@ DEBUG = getenv_bool('DEBUG', False)
 ALLOWED_HOSTS = ['178.128.156.225', 'localhost', '127.0.0.1']
 
 # CORS Configuration
-FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'http://178.128.156.225:3000')
+FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'http://178.128.156.225')
 
 # Session Configuration
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
@@ -58,11 +58,13 @@ CSRF_COOKIE_HTTPONLY = True
 CSRF_TRUSTED_ORIGINS = getenv_list(
     'CSRF_TRUSTED_ORIGINS',
     [
+        'http://178.128.156.225',
         'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
     ],
 )
+
 
 # Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
@@ -128,6 +130,9 @@ DATABASES = {
         'HOST': '127.0.0.1',
         'PORT': '5432',
         'CONN_MAX_AGE': 60,
+    }
+}
+
 
 
 
