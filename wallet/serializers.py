@@ -42,6 +42,7 @@ class WalletSerializer(serializers.ModelSerializer):
 class GoogleAuthRequestSerializer(serializers.Serializer):
     code = serializers.CharField(required=True)
     state = serializers.CharField(required=True)
+    device_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
 
 class EmailSignupSerializer(serializers.Serializer):
@@ -75,6 +76,18 @@ class EmailLoginSerializer(serializers.Serializer):
         if not attrs.get('identifier') and not attrs.get('email'):
             raise serializers.ValidationError({'identifier': 'Email or phone number is required.'})
         return attrs
+
+
+class OtpChallengeRequestSerializer(serializers.Serializer):
+    purpose = serializers.ChoiceField(choices=['login', 'transfer', 'withdrawal', 'provider_link', 'admin_login'])
+    device_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    platform = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    device_name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+
+
+class OtpChallengeVerifySerializer(serializers.Serializer):
+    challenge_id = serializers.UUIDField()
+    code = serializers.RegexField(regex=r'^\d{6}$')
 
 
 class ChangePasswordSerializer(serializers.Serializer):

@@ -121,17 +121,28 @@ TEMPLATES = [
 WSGI_APPLICATION = 'walletmvp.wsgi.application'
 
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'walletmvp',
-        'USER': 'walletapp',
-        'PASSWORD': os.getenv('DB_PASSWORD', 'TUTU2005'),
-        'HOST': '127.0.0.1',
-        'PORT': '5432',
-        'CONN_MAX_AGE': 60,
+db_url = os.getenv('DATABASE_URL', '')
+if db_url.startswith('sqlite:///'):
+    sqlite_path = db_url.replace('sqlite:///', '')
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / sqlite_path,
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('DB_NAME', 'walletmvp'),
+            'USER': os.getenv('DB_USER', 'walletapp'),
+            'PASSWORD': os.getenv('DB_PASSWORD', 'TUTU2005'),
+            'HOST': os.getenv('DB_HOST', '127.0.0.1'),
+            'PORT': os.getenv('DB_PORT', '5432'),
+            'CONN_MAX_AGE': 60,
+        }
+    }
+
 
 
 
@@ -201,6 +212,8 @@ REST_FRAMEWORK = {
         'anon': '100/day',
         'user': os.getenv('USER_API_RATE', '1200/minute'),
         'merchant_api': '1000/hour',
+        'otp_request': '5/hour',
+        'otp_verify': '10/15minute',
     },
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'wallet.exceptions.custom_exception_handler',
@@ -286,6 +299,7 @@ GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 
 # QR Code signing secret for HMAC-signed payloads
 QR_SIGNING_SECRET = os.getenv('QR_SIGNING_SECRET', 'change-this-qr-secret-in-production-12345')
+MOBILE_MONEY_WEBHOOK_SECRET = os.getenv('MOBILE_MONEY_WEBHOOK_SECRET', '')
 
 # Celery + Redis
 REDIS_URL = os.getenv('REDIS_URL')

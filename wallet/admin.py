@@ -9,6 +9,7 @@ from .models import (
     LinkedProvider, ExchangeRate, Dispute, PaymentRequest, SplitRequest, SystemSetting,
     MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
     PushDevice,
+    TrustedDevice, OtpChallenge, MobileMoneyWebhookEvent,
     SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission,
 )
 
@@ -160,6 +161,54 @@ class PushDeviceAdmin(admin.ModelAdmin):
     list_filter = ['platform', 'active']
     search_fields = ['user__email', 'user__handle', 'token']
     readonly_fields = ['token', 'last_seen_at', 'created_at']
+
+
+@admin.register(TrustedDevice)
+class TrustedDeviceAdmin(admin.ModelAdmin):
+    list_display = ['user', 'device_id', 'platform', 'is_trusted', 'revoked_at', 'last_seen_at']
+    list_filter = ['platform', 'is_trusted']
+    search_fields = ['user__email', 'user__handle', 'device_id']
+    readonly_fields = ['device_id', 'first_seen_at', 'last_seen_at']
+    actions = ['revoke_devices']
+
+    @admin.action(description='Revoke selected trusted devices')
+    def revoke_devices(self, request, queryset):
+        count = queryset.update(is_trusted=False, revoked_at=timezone.now())
+        self.message_user(request, f'{count} trusted device(s) revoked.', messages.SUCCESS)
+
+
+@admin.register(OtpChallenge)
+class OtpChallengeAdmin(admin.ModelAdmin):
+    list_display = ['user', 'purpose', 'device', 'attempts', 'expires_at', 'consumed_at', 'created_at']
+    list_filter = ['purpose', 'consumed_at']
+    search_fields = ['user__email', 'user__handle', 'request_id']
+    readonly_fields = ['user', 'device', 'purpose', 'code_hash', 'expires_at', 'consumed_at', 'attempts', 'max_attempts', 'locked_until', 'request_id', 'ip_address', 'user_agent', 'created_at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(MobileMoneyWebhookEvent)
+class MobileMoneyWebhookEventAdmin(admin.ModelAdmin):
+    list_display = ['event_id', 'provider_transaction_id', 'status', 'received_at', 'processed_at']
+    list_filter = ['status']
+    search_fields = ['event_id', 'provider_transaction_id']
+    readonly_fields = ['event_id', 'provider_transaction_id', 'status', 'signature', 'received_at', 'processed_at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(ProcessedRequest)

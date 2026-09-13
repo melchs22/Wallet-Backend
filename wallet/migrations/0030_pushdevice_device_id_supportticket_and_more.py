@@ -12,11 +12,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='pushdevice',
-            name='device_id',
-            field=models.CharField(blank=True, db_index=True, default='', max_length=255),
-        ),
         migrations.CreateModel(
             name='SupportTicket',
             fields=[

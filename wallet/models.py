@@ -474,6 +474,65 @@ class PushDevice(models.Model):
         ordering = ['-last_seen_at']
 
 
+class TrustedDevice(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trusted_devices')
+    device_id = models.CharField(max_length=255, unique=True, db_index=True)
+    device_name = models.CharField(max_length=120, blank=True, default='')
+    platform = models.CharField(max_length=20, blank=True, default='')
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    is_trusted = models.BooleanField(default=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'trusted_devices'
+        ordering = ['-last_seen_at']
+
+
+class OtpChallenge(models.Model):
+    class Purpose(models.TextChoices):
+        LOGIN = 'login', 'Login'
+        TRANSFER = 'transfer', 'Transfer'
+        WITHDRAWAL = 'withdrawal', 'Withdrawal'
+        PROVIDER_LINK = 'provider_link', 'Provider link'
+        ADMIN_LOGIN = 'admin_login', 'Admin login'
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='otp_challenges')
+    device = models.ForeignKey(TrustedDevice, on_delete=models.SET_NULL, null=True, blank=True, related_name='otp_challenges')
+    purpose = models.CharField(max_length=30, choices=Purpose.choices)
+    code_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=3)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    request_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'otp_challenges'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'purpose', 'created_at']),
+            models.Index(fields=['expires_at', 'consumed_at']),
+        ]
+
+
+class MobileMoneyWebhookEvent(models.Model):
+    event_id = models.CharField(max_length=255, unique=True)
+    provider_transaction_id = models.CharField(max_length=255, db_index=True)
+    status = models.CharField(max_length=30)
+    signature = models.CharField(max_length=128)
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'mobile_money_webhook_events'
+        ordering = ['-received_at']
+
+
 class SystemSetting(models.Model):
     key = models.CharField(max_length=100, unique=True)
     value = models.TextField()

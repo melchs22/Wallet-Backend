@@ -25,7 +25,7 @@ import hashlib
 import base64
 from django.conf import settings
 from .models import (
-    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice,
+    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, OtpChallenge, MobileMoneyWebhookEvent,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
@@ -47,7 +47,7 @@ from .serializers import (
     MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer,
     MerchantPlanSerializer, MerchantSubscriptionSerializer, ChangePasswordSerializer,
     SupportedCountrySerializer, LegalDocumentSerializer, ProviderCatalogSerializer,
-    UserKYCSubmissionSerializer
+    UserKYCSubmissionSerializer, OtpChallengeRequestSerializer, OtpChallengeVerifySerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -59,6 +59,14 @@ from django.db import models
 from django.db.models import Sum, Q
 from django.core.exceptions import ValidationError
 from .authentication import issue_access_token
+from .throttles import OtpRequestThrottle, OtpVerifyThrottle
+from .services.security import (
+    create_otp_challenge,
+    device_id_from_request,
+    get_or_create_device,
+    token_is_step_up_verified,
+    valid_webhook_signature,
+)
 
 # Configure structured JSON logging
 logger = logging.getLogger(__name__)
@@ -201,7 +209,7 @@ class EmailSignupView(APIView):
         response_data = {
             'user': UserSerializer(user).data,
             'wallet': WalletSerializer(user.wallet).data,
-            'access_token': issue_access_token(user),
+            'access_token': issue_access_token(user, device_id=device_id or None),
             'is_new_user': True,
         }
         request.session.save()
@@ -346,7 +354,7 @@ class EmailLoginView(APIView):
         response_data = {
             'user': UserSerializer(user).data,
             'wallet': WalletSerializer(wallet).data,
-            'access_token': issue_access_token(user),
+            'access_token': issue_access_token(user, device_id=device_id or None),
             'is_new_user': False,
         }
         request.session.save()
@@ -373,6 +381,7 @@ class GoogleAuthView(APIView):
 
         code = serializer.validated_data['code']
         state = serializer.validated_data['state']
+        device_id = serializer.validated_data.get('device_id', '').strip()
 
         # In production, verify the state parameter matches what we sent
         # For MVP, we'll skip state verification but it should be implemented
@@ -504,7 +513,7 @@ class GoogleAuthView(APIView):
                 # Browser privacy controls can reject Render's third-party session
                 # cookie when the app is served by Vercel.  Return a signed API
                 # token so the frontend can authenticate every API request.
-                'access_token': issue_access_token(user),
+                'access_token': issue_access_token(user, device_id=device_id or None),
             }
             
             response = Response(response_data, status=status.HTTP_200_OK)
@@ -611,7 +620,7 @@ class AdminLoginView(APIView):
         response_data = {
             'user': UserSerializer(user).data,
             'wallet': WalletDetailSerializer(wallet).data,
-            'access_token': issue_access_token(user),
+            'access_token': issue_access_token(user, device_id=(request.META.get('HTTP_X_DEVICE_ID') or '').strip() or None),
             'must_change_password': bool(user.must_change_password),
         }
 
@@ -950,6 +959,17 @@ class PushDeviceView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        device_id = serializer.validated_data.get('device_id', '')
+        if device_id:
+            try:
+                get_or_create_device(
+                    request.user,
+                    device_id,
+                    platform=serializer.validated_data.get('platform', ''),
+                )
+            except ValueError as error:
+                return Response({'error': str(error)}, status=status.HTTP_409_CONFLICT)
+
         from .models import PushDevice
         device, _ = PushDevice.objects.update_or_create(
             token=serializer.validated_data['token'],
@@ -971,6 +991,68 @@ class PushDeviceView(APIView):
             from .models import PushDevice
             PushDevice.objects.filter(user=request.user, token=token).update(active=False)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OtpChallengeRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [OtpRequestThrottle]
+
+    def post(self, request):
+        serializer = OtpChallengeRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        device_id = serializer.validated_data.get('device_id') or device_id_from_request(request)
+        if not device_id:
+            return Response({'code': 'device_required', 'error': 'A registered device is required for OTP verification.'}, status=status.HTTP_400_BAD_REQUEST)
+        challenge, code = create_otp_challenge(
+            request.user,
+            serializer.validated_data['purpose'],
+            request,
+            device_id=device_id,
+            platform=serializer.validated_data.get('platform', ''),
+            device_name=serializer.validated_data.get('device_name', ''),
+        )
+        from wallet.tasks import send_otp_push_task
+        send_otp_push_task.delay(str(challenge.request_id), code)
+        return Response({
+            'challenge_id': str(challenge.request_id),
+            'expires_at': challenge.expires_at,
+            'delivery': 'push',
+        }, status=status.HTTP_201_CREATED)
+
+
+class OtpChallengeVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [OtpVerifyThrottle]
+
+    def post(self, request):
+        serializer = OtpChallengeVerifySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            challenge = OtpChallenge.objects.select_related('device').get(
+                request_id=serializer.validated_data['challenge_id'],
+                user=request.user,
+            )
+        except OtpChallenge.DoesNotExist:
+            return Response({'code': 'invalid_challenge', 'error': 'Verification challenge not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from wallet.services.security import verify_otp_challenge, STEP_UP_TTL
+        verified, error = verify_otp_challenge(challenge, serializer.validated_data['code'])
+        if not verified:
+            return Response({'code': 'otp_invalid', 'error': error}, status=status.HTTP_400_BAD_REQUEST)
+        device_id = challenge.device.device_id if challenge.device_id else device_id_from_request(request)
+        token = issue_access_token(
+            request.user,
+            device_id=device_id,
+            step_up_purpose=challenge.purpose,
+            step_up_until=(timezone.now() + STEP_UP_TTL).timestamp(),
+        )
+        return Response({'verified': True, 'access_token': token, 'expires_in': int(STEP_UP_TTL.total_seconds())})
+
+
+def step_up_required(request, purpose):
+    token = request.auth if isinstance(request.auth, str) else ''
+    return not token_is_step_up_verified(token, request.user, request, purpose)
 
 
 @extend_schema(
@@ -998,6 +1080,8 @@ class TransferView(APIView):
         idempotency_key = serializer.validated_data['idempotency_key']
 
         sender = request.user
+        if step_up_required(request, OtpChallenge.Purpose.TRANSFER):
+            return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.TRANSFER, 'error': 'Fresh device verification is required before sending money.'}, status=status.HTTP_403_FORBIDDEN)
         if not user_has_approved_kyc(sender):
             return Response({'error': 'KYC verification is required before sending money. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
         from wallet.services.limits import apply_usage_based_limits
@@ -2914,6 +2998,8 @@ def get_payment_request_detail(request, request_id):
 @transaction.atomic
 def pay_payment_request(request, request_id):
     """Pay a payment request (payer accepts)."""
+    if not user_has_approved_kyc(request.user):
+        return Response({'error': 'KYC verification is required before sending money. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
     try:
         payment_request = PaymentRequest.objects.select_for_update().get(id=request_id)
         
@@ -3479,6 +3565,8 @@ def list_linked_providers(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def link_mobile_money_provider(request):
+    if step_up_required(request, OtpChallenge.Purpose.PROVIDER_LINK):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.PROVIDER_LINK, 'error': 'Fresh device verification is required before linking a provider.'}, status=status.HTTP_403_FORBIDDEN)
     provider = str(request.data.get('provider', '')).strip()
     phone = str(request.data.get('phone_number', '')).strip()
     valid = [choice[0] for choice in LinkedProvider.ProviderType.choices]
@@ -4276,6 +4364,8 @@ def mobile_money_topup(request):
     serializer = MobileMoneyTopupSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    if step_up_required(request, OtpChallenge.Purpose.TRANSFER):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.TRANSFER, 'error': 'Fresh device verification is required before adding money.'}, status=status.HTTP_403_FORBIDDEN)
 
     linked_provider_id = serializer.validated_data['linked_provider_id']
     amount = serializer.validated_data['amount']
@@ -4367,6 +4457,8 @@ def mobile_money_withdrawal(request):
     serializer = MobileMoneyWithdrawalSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    if step_up_required(request, OtpChallenge.Purpose.WITHDRAWAL):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.WITHDRAWAL, 'error': 'Fresh device verification is required before withdrawing money.'}, status=status.HTTP_403_FORBIDDEN)
 
     linked_provider_id = serializer.validated_data['linked_provider_id']
     amount = serializer.validated_data['amount']
@@ -4472,6 +4564,12 @@ def mobile_money_webhook(request):
     Webhook endpoint for mobile money providers to update transaction status.
     Validates the payload, enqueues processing, and returns 200 immediately.
     """
+    timestamp = request.META.get('HTTP_X_WEBHOOK_TIMESTAMP', '')
+    signature = request.META.get('HTTP_X_WEBHOOK_SIGNATURE', '')
+    event_id = request.META.get('HTTP_X_WEBHOOK_ID', '').strip()
+    if not event_id or not valid_webhook_signature(request.body, timestamp, signature):
+        return Response({'error': 'Invalid webhook signature.'}, status=status.HTTP_401_UNAUTHORIZED)
+
     provider_transaction_id = request.data.get('provider_transaction_id')
     webhook_status = request.data.get('status')
     provider_response = request.data.get('response', {})
@@ -4482,7 +4580,16 @@ def mobile_money_webhook(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    if MobileMoneyWebhookEvent.objects.filter(event_id=event_id).exists():
+        return Response({'status': 'already_received'}, status=status.HTTP_200_OK)
+
     try:
+        MobileMoneyWebhookEvent.objects.create(
+            event_id=event_id,
+            provider_transaction_id=provider_transaction_id,
+            status=webhook_status,
+            signature=signature,
+        )
         from wallet.tasks import process_mobile_money_webhook
 
         process_mobile_money_webhook.delay(
@@ -4490,6 +4597,7 @@ def mobile_money_webhook(request):
             status=webhook_status,
             provider_response=provider_response,
         )
+        MobileMoneyWebhookEvent.objects.filter(event_id=event_id).update(processed_at=timezone.now())
         return Response({'status': 'queued'}, status=status.HTTP_200_OK)
     except Exception as e:
         logger.error(f'mobile_money_webhook_enqueue_error: {str(e)}')
@@ -4552,6 +4660,8 @@ def create_scheduled_transfer(request):
     """
     Create a new scheduled/recurring transfer.
     """
+    if not user_has_approved_kyc(request.user):
+        return Response({'error': 'KYC verification is required before sending money. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = ScheduledTransferCreateSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

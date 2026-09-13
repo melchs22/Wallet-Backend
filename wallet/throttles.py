@@ -10,3 +10,11 @@ class SustainableUserRateThrottle(UserRateThrottle):
         if not request.user or not request.user.is_authenticated:
             return None
         return f'throttle_user_{self.cache_key_version}_{request.user.pk}'
+
+
+class OtpRequestThrottle(UserRateThrottle):
+    scope = 'otp_request'
+
+
+class OtpVerifyThrottle(UserRateThrottle):
+    scope = 'otp_verify'

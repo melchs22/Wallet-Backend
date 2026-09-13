@@ -16,7 +16,8 @@ from wallet.services.reconciliation import reconcile_balances
 from wallet.services.transfers import run_scheduled_transfers
 from wallet.services.exchange_rates import refresh_exchange_rates
 from wallet.services.webhooks import deliver_webhook
-from wallet.models import Merchant, MerchantApiKey, MerchantMode
+from wallet.services.security import send_otp_push
+from wallet.models import Merchant, MerchantApiKey, MerchantMode, OtpChallenge
 import hashlib
 import secrets
 
@@ -146,6 +147,27 @@ def send_notification_task(self, notification_id):
         return result
     except Exception as exc:
         _log_task_failure('send_notification_task', exc)
+        raise self.retry(exc=exc)
+
+
+@shared_task(
+    name='wallet.tasks.send_otp_push_task',
+    bind=True,
+    max_retries=2,
+    default_retry_delay=15,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    ignore_result=True,
+)
+def send_otp_push_task(self, challenge_id, code):
+    _log_task_start('send_otp_push_task', challenge_id=challenge_id)
+    try:
+        challenge = OtpChallenge.objects.select_related('user', 'device').get(request_id=challenge_id)
+        result = send_otp_push(challenge, code)
+        _log_task_success('send_otp_push_task', {'status': result.get('status')})
+        return result
+    except Exception as exc:
+        _log_task_failure('send_otp_push_task', exc)
         raise self.retry(exc=exc)
 
 

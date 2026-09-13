@@ -10,9 +10,15 @@ from .models import User, UserStatus
 TOKEN_SALT = 'wallet.api-access-token'
 
 
-def issue_access_token(user):
+def issue_access_token(user, *, device_id=None, step_up_purpose=None, step_up_until=None):
     """Return a signed, expiring token containing only the user's primary key."""
-    return signing.dumps({'user_id': str(user.pk)}, salt=TOKEN_SALT, compress=True)
+    payload = {'user_id': str(user.pk)}
+    if device_id:
+        payload['device_id'] = device_id
+    if step_up_purpose and step_up_until:
+        payload['step_up_purpose'] = step_up_purpose
+        payload['step_up_until'] = int(step_up_until)
+    return signing.dumps(payload, salt=TOKEN_SALT, compress=True)
 
 
 class SignedTokenAuthentication(authentication.BaseAuthentication):
@@ -40,6 +46,9 @@ class SignedTokenAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed('Invalid or expired access token.')
 
         device_id = (request.META.get('HTTP_X_DEVICE_ID') or request.META.get('HTTP_DEVICE_ID') or '').strip()
+        bound_device_id = payload.get('device_id', '')
+        if bound_device_id and device_id != bound_device_id:
+            raise exceptions.AuthenticationFailed('This session is bound to another device.')
         if user.current_device_id and device_id and device_id != user.current_device_id:
             raise exceptions.AuthenticationFailed('This account is active on another device and has been signed out there.')
 

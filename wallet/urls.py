@@ -1,7 +1,7 @@
 from django.urls import path, include
 from .views import (
     EmailSignupView, EmailLoginView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView, resolve_user_by_phone,
-    TransferView, NotificationListView, NotificationDetailView, PushDeviceView,
+    TransferView, NotificationListView, NotificationDetailView, PushDeviceView, OtpChallengeRequestView, OtpChallengeVerifyView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView, AdminLoginView,
     admin_auth_login, admin_auth_logout, admin_change_password,
@@ -49,6 +49,8 @@ urlpatterns = [
     path('admin/auth/change-password', admin_change_password, name='admin_change_password'),
     path('csrf', csrf_cookie_view, name='csrf_cookie'),
     path('auth/logout', logout_view, name='logout'),
+    path('auth/otp/request', OtpChallengeRequestView.as_view(), name='otp_request'),
+    path('auth/otp/verify', OtpChallengeVerifyView.as_view(), name='otp_verify'),
     path('me', MeView.as_view(), name='me'),
     
     # User resolution
