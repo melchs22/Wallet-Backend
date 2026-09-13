@@ -758,78 +758,6 @@ class MeView(APIView):
         
         return Response(response_data, status=status.HTTP_200_OK)
     
-    def patch(self, request):
-        """
-        Update user profile (display_name and/or handle).
-        Enforces 30-day cooldown on handle changes.
-        """
-        serializer = ProfileUpdateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        user = request.user
-        display_name = serializer.validated_data.get('display_name')
-        handle = serializer.validated_data.get('handle')
-        primary_phone_number = serializer.validated_data.get('primary_phone_number')
-        transaction_pin = serializer.validated_data.get('transaction_pin')
-
-        try:
-            with transaction.atomic():
-                if display_name:
-                    user.display_name = display_name
-                
-                if handle:
-                    # Check 30-day cooldown
-                    if user.handle_changed_at:
-                        cooldown_end = user.handle_changed_at + timedelta(days=30)
-                        if timezone.now() < cooldown_end:
-                            return Response(
-                                {'error': 'Handle can only be changed once every 30 days'},
-                                status=status.HTTP_400_BAD_REQUEST
-                            )
-                    
-                    # Check if handle is already taken
-                    if User.objects.filter(handle=handle).exclude(id=user.id).exists():
-                        return Response(
-                            {'error': 'Handle already taken'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-                    
-                    user.handle = handle
-                    user.handle_changed_at = timezone.now()
-                
-                if primary_phone_number:
-                    # Check if phone number is already taken
-                    if User.objects.filter(primary_phone_number=primary_phone_number).exclude(id=user.id).exists():
-                        return Response(
-                            {'error': 'Phone number already in use'},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-                    user.primary_phone_number = primary_phone_number
-                
-                if transaction_pin:
-                    user.transaction_pin = make_password(transaction_pin)
-                
-                user.save()
-                
-                # Audit log
-                AuditLog.objects.create(
-                    user=user,
-                    action='profile_update',
-                    metadata={'display_name': display_name, 'handle': handle, 'primary_phone_number': primary_phone_number, 'transaction_pin_set': bool(transaction_pin)}
-                )
-            
-            return Response(
-                UserSerializer(user).data,
-                status=status.HTTP_200_OK
-            )
-            
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
 
 @extend_schema(
     responses={200: UserResolveSerializer, 404: dict},
@@ -2998,6 +2926,8 @@ def get_payment_request_detail(request, request_id):
 @transaction.atomic
 def pay_payment_request(request, request_id):
     """Pay a payment request (payer accepts)."""
+    if step_up_required(request, OtpChallenge.Purpose.TRANSFER):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.TRANSFER, 'error': 'Fresh device verification is required before paying this request.'}, status=status.HTTP_403_FORBIDDEN)
     if not user_has_approved_kyc(request.user):
         return Response({'error': 'KYC verification is required before sending money. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
     try:
@@ -3477,6 +3407,8 @@ def pay_qr_payload(request):
     """Pay a signed user QR code after the payer confirms the amount."""
     encoded = str(request.data.get('encoded', '')).strip()
     amount = request.data.get('amount')
+    if step_up_required(request, OtpChallenge.Purpose.TRANSFER):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.TRANSFER, 'error': 'Fresh device verification is required before paying by QR.'}, status=status.HTTP_403_FORBIDDEN)
     if not user_has_approved_kyc(request.user):
         return Response({'error': 'KYC verification is required before scanning or sending QR payments. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
     if not encoded or amount in (None, ''):
@@ -4660,6 +4592,8 @@ def create_scheduled_transfer(request):
     """
     Create a new scheduled/recurring transfer.
     """
+    if step_up_required(request, OtpChallenge.Purpose.TRANSFER):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.TRANSFER, 'error': 'Fresh device verification is required before scheduling a transfer.'}, status=status.HTTP_403_FORBIDDEN)
     if not user_has_approved_kyc(request.user):
         return Response({'error': 'KYC verification is required before sending money. Please submit your ID details first.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = ScheduledTransferCreateSerializer(data=request.data)

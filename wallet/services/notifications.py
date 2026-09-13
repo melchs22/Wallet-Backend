@@ -75,7 +75,7 @@ def deliver_notification(notification_id):
 
     if notification.type.startswith((
         'transfer_', 'payment_request_', 'split_request_', 'parental_',
-        'wallet_', 'money_', 'qr_payment_', 'device_signed_in_elsewhere'
+        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'device_signed_in_elsewhere'
     )):
         _send_push(notification)
 
@@ -122,7 +122,6 @@ def _send_push(notification):
     try:
         firebase_admin.get_app()
     except ValueError:
-        credential_path = '/var/www/backend/Wallet-Backend/dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
         credential_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
         if credential_json:
             try:
@@ -132,12 +131,10 @@ def _send_push(notification):
                 return
         else:
             local_credential_path = Path(__file__).resolve().parents[2] / 'dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
-            credential_path = credential_path or (str(local_credential_path) if local_credential_path.exists() else None)
-        if credential_path:
-            credential = credentials.Certificate(credential_path)
-        elif not credential_json:
-            logger.warning('firebase_credentials_not_configured')
-            return
+            if not local_credential_path.exists():
+                logger.warning('firebase_credentials_not_configured')
+                return
+            credential = credentials.Certificate(str(local_credential_path))
         firebase_admin.initialize_app(credential)
 
     devices = PushDevice.objects.filter(user=notification.user, active=True)
@@ -152,6 +149,12 @@ def _send_push(notification):
             body=payload.get('message', 'You have a new wallet update.'),
         ),
         data={key: str(value) for key, value in payload.items() if value is not None},
+        apns=messaging.APNSConfig(
+            headers={'apns-push-type': 'alert', 'apns-priority': '10'},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound='default', badge=1),
+            ),
+        ),
     )
     response = messaging.send_each_for_multicast(message)
     for device, result in zip(devices, response.responses):
