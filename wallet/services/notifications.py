@@ -21,7 +21,8 @@ def create_notification_record(user, notification_type, payload):
         'payment_request_declined': 'Payment request declined',
         'parental_link_approved': 'Parental link approved',
         'parental_link_declined': 'Parental link declined',
-        'transfer_received': 'Money received',
+            'transfer_received': 'Money received',
+            'incoming_transfer': 'Incoming transfer',
         'payment_request_paid': 'Payment request paid',
         'payment_request_expired': 'Payment request expired',
         'device_signed_in_elsewhere': 'Security notice',
@@ -59,6 +60,8 @@ def _notification_message(notification_type, payload):
         return f"{payload.get('child_display_name', 'The child')} declined the parental link."
     if notification_type == 'transfer_received':
         return f"You received {amount} {currency}."
+    if notification_type == 'incoming_transfer':
+        return f"{payload.get('sender_display_name', 'A user')} started a transfer of {amount} {currency}."
     return 'You have a new wallet update.'
 
 
@@ -75,7 +78,7 @@ def deliver_notification(notification_id):
 
     if notification.type.startswith((
         'transfer_', 'payment_request_', 'split_request_', 'parental_',
-        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'device_signed_in_elsewhere'
+        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'incoming_transfer', 'device_signed_in_elsewhere'
     )):
         _send_push(notification)
 

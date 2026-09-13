@@ -55,6 +55,9 @@ def execute_p2p_transfer(
     if existing and existing.transaction:
         return existing.transaction
 
+    from wallet.services.fees import calculate_transfer_fee
+    fee_amount = calculate_transfer_fee(amount)
+
     if sender.status != UserStatus.ACTIVE:
         raise TransferExecutionError('sender_account_suspended', 'Sender account is suspended')
     if recipient.status != UserStatus.ACTIVE:
@@ -74,21 +77,21 @@ def execute_p2p_transfer(
         sender_wallet = Wallet.objects.select_for_update().get(pk=sender_wallet.pk)
 
         current_balance = sender_wallet.get_balance()
-        if current_balance < amount:
+        if current_balance < amount + fee_amount:
             raise TransferExecutionError('insufficient_funds', 'Insufficient funds')
 
         if not skip_limit_checks:
             from wallet.services.limits import apply_usage_based_limits
             apply_usage_based_limits(sender)
             sender.refresh_from_db()
-            if amount > sender.send_limit_per_tx:
+            if amount + fee_amount > sender.send_limit_per_tx:
                 raise TransferExecutionError('per_transaction_limit_exceeded', 'Per-transaction limit exceeded')
 
             # Check daily limit (auto-resets at midnight)
             from wallet.services.limits import get_daily_sent_amount
             sent_today = get_daily_sent_amount(sender)
 
-            if sent_today + amount > sender.send_limit_daily:
+            if sent_today + amount + fee_amount > sender.send_limit_daily:
                 raise TransferExecutionError('daily_limit_exceeded', 'Daily limit exceeded')
 
         transaction_obj = Transaction.objects.create(
@@ -97,6 +100,7 @@ def execute_p2p_transfer(
             recipient=recipient,
             amount=amount,
             currency=currency,
+            fee_amount=fee_amount,
             note=note,
             status=TransactionStatus.COMPLETED,
         )
@@ -107,6 +111,13 @@ def execute_p2p_transfer(
             direction=LedgerDirection.DEBIT,
             amount=amount,
         )
+        if fee_amount > 0:
+            LedgerEntry.objects.create(
+                wallet=sender_wallet,
+                transaction=transaction_obj,
+                direction=LedgerDirection.DEBIT,
+                amount=fee_amount,
+            )
         LedgerEntry.objects.create(
             wallet=recipient_wallet,
             transaction=transaction_obj,

@@ -980,7 +980,7 @@ class OtpChallengeVerifyView(APIView):
 
 def step_up_required(request, purpose):
     token = request.auth if isinstance(request.auth, str) else ''
-    return not token_is_step_up_verified(token, request.user, request, purpose)
+    return not token_is_step_up_verified(token, request.user, request)
 
 
 @extend_schema(
@@ -1245,19 +1245,22 @@ class TransferView(APIView):
                     )
 
                 sender_wallet = Wallet.objects.select_for_update().get(id=sender_wallet.id)
+                from wallet.services.fees import calculate_transfer_fee
+                fee_amount = calculate_transfer_fee(amount)
+                total_debit = amount + fee_amount
                 current_balance = sender_wallet.get_balance()
-                if current_balance < amount:
+                if current_balance < total_debit:
                     return Response(
                         {'code': 'insufficient_funds', 'message': 'Insufficient funds'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                if amount > sender.send_limit_per_tx:
+                if total_debit > sender.send_limit_per_tx:
                     return Response(
                         {'code': 'per_transaction_limit_exceeded', 'message': 'Amount exceeds per-transaction limit'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 from wallet.services.limits import get_daily_sent_amount
-                if get_daily_sent_amount(sender) + amount > sender.send_limit_daily:
+                if get_daily_sent_amount(sender) + total_debit > sender.send_limit_daily:
                     return Response(
                         {'code': 'daily_limit_exceeded', 'message': 'Amount exceeds daily limit'},
                         status=status.HTTP_400_BAD_REQUEST,

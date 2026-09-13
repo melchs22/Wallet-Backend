@@ -324,6 +324,7 @@ class Transaction(models.Model):
         related_name='received_transactions'
     )
     amount = models.DecimalField(max_digits=20, decimal_places=2)
+    fee_amount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('0.00'))
     currency = models.CharField(max_length=3)
     note = models.TextField(blank=True)
     status = models.CharField(

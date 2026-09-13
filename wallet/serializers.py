@@ -236,7 +236,7 @@ class TransactionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'type', 'counterparty_handle', 'counterparty_display_name',
             'counterparty_avatar_url', 'amount', 'currency', 'note', 'status',
-            'direction', 'created_at'
+            'direction', 'fee_amount', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
 

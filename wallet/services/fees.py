@@ -6,6 +6,11 @@ from django.utils import timezone
 from wallet.models import FeeAppliesTo, FeePolicy, FeeWaiver, Merchant, TransferFeeRule, User
 
 
+def calculate_transfer_fee(amount, currency='GNF'):
+    fee_amount, _ = resolve_withdrawal_fee(Decimal(amount), currency=currency)
+    return fee_amount
+
+
 def get_platform_wallet(currency='GNF', is_sandbox=False):
     from wallet.models import Wallet, WalletStatus
 

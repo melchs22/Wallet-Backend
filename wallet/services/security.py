@@ -103,17 +103,30 @@ def verify_otp_challenge(challenge, code):
     return True, None
 
 
-def token_is_step_up_verified(token, user, request, purpose):
+def token_is_step_up_verified(token, user, request, purpose=None):
     try:
         payload = signing.loads(token, salt='wallet.api-access-token', max_age=settings.API_ACCESS_TOKEN_MAX_AGE)
     except signing.BadSignature:
         return False
-    if payload.get('user_id') != str(user.pk) or payload.get('step_up_purpose') != purpose:
+    if payload.get('user_id') != str(user.pk):
+        return False
+    if purpose and payload.get('step_up_purpose') != purpose:
         return False
     if int(payload.get('step_up_until', 0)) <= int(timezone.now().timestamp()):
         return False
     device_id = device_id_from_request(request)
-    return bool(device_id and payload.get('device_id') == device_id)
+    if not device_id or payload.get('device_id') != device_id:
+        return False
+    if payload.get('step_up_purpose'):
+        return True
+    if user.current_device_id == device_id:
+        return True
+    return TrustedDevice.objects.filter(
+        user=user,
+        device_id=device_id,
+        is_trusted=True,
+        revoked_at__isnull=True,
+    ).exists()
 
 
 def webhook_signature(payload, timestamp):
