@@ -121,27 +121,17 @@ TEMPLATES = [
 WSGI_APPLICATION = 'walletmvp.wsgi.application'
 
 
-db_url = os.getenv('DATABASE_URL', '')
-if db_url.startswith('sqlite:///'):
-    sqlite_path = db_url.replace('sqlite:///', '')
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / sqlite_path,
-        }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'walletmvp',
+        'USER': 'walletapp',
+        'PASSWORD': os.getenv('DB_PASSWORD', 'TUTU2005'),
+        'HOST': '127.0.0.1',
+        'PORT': '5432',
+        'CONN_MAX_AGE': 60,
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.getenv('DB_NAME', 'walletmvp'),
-            'USER': os.getenv('DB_USER', 'walletapp'),
-            'PASSWORD': os.getenv('DB_PASSWORD', 'TUTU2005'),
-            'HOST': os.getenv('DB_HOST', '127.0.0.1'),
-            'PORT': os.getenv('DB_PORT', '5432'),
-            'CONN_MAX_AGE': 60,
-        }
-    }
+}
 
 
 
