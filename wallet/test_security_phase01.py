@@ -74,6 +74,20 @@ class OtpChallengeTests(TestCase):
         self.assertFalse(token_is_step_up_verified(token, self.user, request, 'transfer'))
         self.assertFalse(token_is_step_up_verified(token, self.user, request, 'withdrawal'))
 
+    def test_current_device_can_use_normal_and_legacy_tokens_without_otp(self):
+        self.user.current_device_id = 'device-current'
+        self.user.save(update_fields=['current_device_id'])
+        request = self.factory.post('/api/transfers', HTTP_X_DEVICE_ID='device-current')
+        normal_token = issue_access_token(self.user, device_id='device-current')
+        legacy_token = issue_access_token(self.user)
+        self.assertTrue(token_is_step_up_verified(normal_token, self.user, request))
+        self.assertTrue(token_is_step_up_verified(legacy_token, self.user, request))
+
+    def test_bound_normal_token_does_not_require_push_registration(self):
+        request = self.factory.post('/api/transfers', HTTP_X_DEVICE_ID='email-login-device')
+        token = issue_access_token(self.user, device_id='email-login-device')
+        self.assertTrue(token_is_step_up_verified(token, self.user, request))
+
 
 @override_settings(MOBILE_MONEY_WEBHOOK_SECRET='test-webhook-secret')
 class WebhookSecurityTests(TestCase):

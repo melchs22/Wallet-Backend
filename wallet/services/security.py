@@ -112,12 +112,18 @@ def token_is_step_up_verified(token, user, request, purpose=None):
         return False
     if purpose and payload.get('step_up_purpose') != purpose:
         return False
-    if int(payload.get('step_up_until', 0)) <= int(timezone.now().timestamp()):
-        return False
     device_id = device_id_from_request(request)
-    if not device_id or payload.get('device_id') != device_id:
+    if not device_id:
+        return False
+    if not payload.get('device_id'):
+        return user.current_device_id == device_id
+    if payload.get('device_id') != device_id:
         return False
     if payload.get('step_up_purpose'):
+        if int(payload.get('step_up_until', 0)) <= int(timezone.now().timestamp()):
+            return False
+        return True
+    if payload.get('device_id') == device_id:
         return True
     if user.current_device_id == device_id:
         return True

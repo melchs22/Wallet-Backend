@@ -503,6 +503,14 @@ class GoogleAuthView(APIView):
                     login(request, user)
                     
                     is_new_user = True
+
+            if device_id:
+                try:
+                    get_or_create_device(user, device_id)
+                except ValueError:
+                    return Response({'code': 'device_conflict', 'error': 'This device is registered to another account.'}, status=status.HTTP_409_CONFLICT)
+                user.current_device_id = device_id
+                user.save(update_fields=['current_device_id'])
             
             wallet = user.wallet
             
