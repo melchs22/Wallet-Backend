@@ -22,7 +22,7 @@ from .views import (
     merchant_dashboard, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
     merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant,
     supported_countries, legal_document, legal_document_html, provider_catalog,
-    change_password, UserKYCSubmissionView
+    change_password, UserKYCSubmissionView, login_status, confirm_login, trusted_devices, revoke_trusted_device
 )
 from .approval_views import list_pending_approvals, approve_transaction, decline_transaction
 from .parental_views import (
@@ -51,6 +51,10 @@ urlpatterns = [
     path('auth/logout', logout_view, name='logout'),
     path('auth/otp/request', OtpChallengeRequestView.as_view(), name='otp_request'),
     path('auth/otp/verify', OtpChallengeVerifyView.as_view(), name='otp_verify'),
+    path('auth/login/status/<uuid:request_id>', login_status, name='login_status'),
+    path('auth/login/confirm', confirm_login, name='confirm_login'),
+    path('auth/devices', trusted_devices, name='trusted_devices'),
+    path('auth/devices/<str:device_id>/revoke', revoke_trusted_device, name='revoke_trusted_device'),
     path('me', MeView.as_view(), name='me'),
     
     # User resolution

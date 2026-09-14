@@ -70,12 +70,19 @@ class EmailLoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=False)
     country_code = serializers.CharField(required=False, allow_blank=True, max_length=2)
     device_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    device_name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    public_key_pem = serializers.CharField(required=False, allow_blank=True, max_length=4096)
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
         if not attrs.get('identifier') and not attrs.get('email'):
             raise serializers.ValidationError({'identifier': 'Email or phone number is required.'})
         return attrs
+
+
+class LoginConfirmationSerializer(serializers.Serializer):
+    request_id = serializers.UUIDField()
+    decision = serializers.ChoiceField(choices=['approve', 'deny'])
 
 
 class OtpChallengeRequestSerializer(serializers.Serializer):
@@ -221,6 +228,8 @@ class PushDeviceSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=512)
     device_id = serializers.CharField(max_length=255, required=False, allow_blank=True)
     platform = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    device_name = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    public_key_pem = serializers.CharField(max_length=4096, required=False, allow_blank=True)
 
 
 class TransactionSerializer(serializers.ModelSerializer):

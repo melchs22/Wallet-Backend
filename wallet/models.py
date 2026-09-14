@@ -480,6 +480,7 @@ class TrustedDevice(models.Model):
     device_id = models.CharField(max_length=255, unique=True, db_index=True)
     device_name = models.CharField(max_length=120, blank=True, default='')
     platform = models.CharField(max_length=20, blank=True, default='')
+    public_key_pem = models.TextField(blank=True, default='')
     first_seen_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(auto_now=True)
     is_trusted = models.BooleanField(default=True)
@@ -488,6 +489,32 @@ class TrustedDevice(models.Model):
     class Meta:
         db_table = 'trusted_devices'
         ordering = ['-last_seen_at']
+
+
+class PendingLoginRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        DENIED = 'denied', 'Denied'
+        EXPIRED = 'expired', 'Expired'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='pending_login_requests')
+    new_device_id = models.CharField(max_length=255)
+    new_device_name = models.CharField(max_length=120, blank=True, default='')
+    new_device_public_key_pem = models.TextField()
+    requesting_ip = models.GenericIPAddressField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by_device = models.ForeignKey(TrustedDevice, null=True, blank=True, on_delete=models.SET_NULL, related_name='resolved_login_requests')
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'status', 'created_at'])]
+
+    def is_expired(self):
+        return timezone.now() >= self.created_at + timedelta(minutes=5)
 
 
 class OtpChallenge(models.Model):

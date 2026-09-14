@@ -49,9 +49,6 @@ class SignedTokenAuthentication(authentication.BaseAuthentication):
         bound_device_id = payload.get('device_id', '')
         if bound_device_id and device_id != bound_device_id:
             raise exceptions.AuthenticationFailed('This session is bound to another device.')
-        if user.current_device_id and device_id and device_id != user.current_device_id:
-            raise exceptions.AuthenticationFailed('This account is active on another device and has been signed out there.')
-
         return (user, header[1].decode('utf-8'))
 
     def authenticate_header(self, request):

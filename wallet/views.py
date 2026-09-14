@@ -25,7 +25,7 @@ import hashlib
 import base64
 from django.conf import settings
 from .models import (
-    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, OtpChallenge, MobileMoneyWebhookEvent,
+    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
@@ -47,7 +47,7 @@ from .serializers import (
     MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer,
     MerchantPlanSerializer, MerchantSubscriptionSerializer, ChangePasswordSerializer,
     SupportedCountrySerializer, LegalDocumentSerializer, ProviderCatalogSerializer,
-    UserKYCSubmissionSerializer, OtpChallengeRequestSerializer, OtpChallengeVerifySerializer
+    UserKYCSubmissionSerializer, OtpChallengeRequestSerializer, OtpChallengeVerifySerializer, LoginConfirmationSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -64,6 +64,7 @@ from .services.security import (
     create_otp_challenge,
     device_id_from_request,
     get_or_create_device,
+    verify_device_signature,
     token_is_step_up_verified,
     valid_webhook_signature,
 )
@@ -315,7 +316,39 @@ class EmailLoginView(APIView):
         if user.status != UserStatus.ACTIVE:
             return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
 
-        if user.current_device_id and device_id and device_id != user.current_device_id:
+        device = TrustedDevice.objects.filter(
+            user=user, device_id=device_id, is_trusted=True, revoked_at__isnull=True,
+        ).first() if device_id else None
+        trusted_exists = user.trusted_devices.filter(is_trusted=True, revoked_at__isnull=True).exists()
+        public_key_pem = (serializer.validated_data.get('public_key_pem') or '').strip()
+        if device is None and trusted_exists:
+            if not device_id or not public_key_pem:
+                return Response({'error': 'A device ID and public signing key are required for new-device login.'}, status=status.HTTP_400_BAD_REQUEST)
+            pending = PendingLoginRequest.objects.create(
+                user=user,
+                new_device_id=device_id,
+                new_device_name=serializer.validated_data.get('device_name', '').strip(),
+                new_device_public_key_pem=public_key_pem,
+                requesting_ip=request.META.get('REMOTE_ADDR'),
+            )
+            create_notification(user, 'new_device_login', {
+                'type': 'new_device_login',
+                'request_id': str(pending.id),
+                'new_device_name': pending.new_device_name or 'A new device',
+                'created_at': pending.created_at.isoformat(),
+                'title': 'Approve new device sign-in',
+                'message': f"Approve sign-in from {pending.new_device_name or 'a new device'}.",
+            })
+            return Response({'status': 'pending_confirmation', 'request_id': str(pending.id), 'expires_in': 300}, status=status.HTTP_202_ACCEPTED)
+
+        if device is None and device_id:
+            get_or_create_device(
+                user, device_id,
+                device_name=serializer.validated_data.get('device_name', ''),
+                public_key_pem=public_key_pem,
+            )
+
+        if device is None and user.current_device_id and device_id and device_id != user.current_device_id:
             previous_device = user.current_device_id
             for device in PushDevice.objects.filter(user=user, active=True).exclude(device_id=device_id or '').exclude(device_id=''):
                 create_notification(
@@ -330,7 +363,7 @@ class EmailLoginView(APIView):
                 )
             user.current_device_id = device_id
             user.save(update_fields=['current_device_id'])
-        elif device_id:
+        elif device is None and device_id:
             user.current_device_id = device_id
             user.save(update_fields=['current_device_id'])
 
@@ -902,6 +935,8 @@ class PushDeviceView(APIView):
                     request.user,
                     device_id,
                     platform=serializer.validated_data.get('platform', ''),
+                    device_name=serializer.validated_data.get('device_name', ''),
+                    public_key_pem=serializer.validated_data.get('public_key_pem', ''),
                 )
             except ValueError as error:
                 return Response({'error': str(error)}, status=status.HTTP_409_CONFLICT)
@@ -927,6 +962,106 @@ class PushDeviceView(APIView):
             from .models import PushDevice
             PushDevice.objects.filter(user=request.user, token=token).update(active=False)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def login_status(request, request_id):
+    try:
+        pending = PendingLoginRequest.objects.select_related('user').get(id=request_id)
+    except PendingLoginRequest.DoesNotExist:
+        return Response({'error': 'Login request not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if pending.status == PendingLoginRequest.Status.PENDING and pending.is_expired():
+        pending.status = PendingLoginRequest.Status.EXPIRED
+        pending.resolved_at = timezone.now()
+        pending.save(update_fields=['status', 'resolved_at'])
+    response = {'status': pending.status}
+    if pending.status == PendingLoginRequest.Status.APPROVED:
+        response['access_token'] = issue_access_token(pending.user, device_id=pending.new_device_id)
+        wallet = getattr(pending.user, 'wallet', None)
+        response['user'] = UserSerializer(pending.user).data
+        response['wallet'] = WalletSerializer(wallet).data if wallet else None
+    return Response(response)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def confirm_login(request):
+    serializer = LoginConfirmationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    device, error = verify_device_signature(request, request.user)
+    if error:
+        return Response({'error': error}, status=status.HTTP_401_UNAUTHORIZED)
+    with transaction.atomic():
+        try:
+            pending = PendingLoginRequest.objects.select_for_update().get(
+                id=serializer.validated_data['request_id'], user=request.user,
+            )
+        except PendingLoginRequest.DoesNotExist:
+            return Response({'error': 'Login request not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if pending.status != PendingLoginRequest.Status.PENDING:
+            return Response({'status': pending.status}, status=status.HTTP_409_CONFLICT)
+        if pending.is_expired():
+            pending.status = PendingLoginRequest.Status.EXPIRED
+            pending.resolved_at = timezone.now()
+            pending.save(update_fields=['status', 'resolved_at'])
+            return Response({'status': pending.status}, status=status.HTTP_410_GONE)
+        pending.status = PendingLoginRequest.Status.APPROVED if serializer.validated_data['decision'] == 'approve' else PendingLoginRequest.Status.DENIED
+        pending.resolved_by_device = device
+        pending.resolved_at = timezone.now()
+        pending.save(update_fields=['status', 'resolved_by_device', 'resolved_at'])
+    if pending.status == PendingLoginRequest.Status.APPROVED:
+        get_or_create_device(
+            request.user, pending.new_device_id,
+            device_name=pending.new_device_name,
+            public_key_pem=pending.new_device_public_key_pem,
+        )
+    return Response({'status': pending.status})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def trusted_devices(request):
+    current_device_id = device_id_from_request(request)
+    if not current_device_id or current_device_id != request.user.current_device_id:
+        return Response({'error': 'Only the main device can manage trusted devices.'}, status=status.HTTP_403_FORBIDDEN)
+    devices = request.user.trusted_devices.filter(is_trusted=True, revoked_at__isnull=True)
+    return Response([{
+        'device_id': device.device_id,
+        'device_name': device.device_name or 'Trusted device',
+        'platform': device.platform,
+        'last_seen_at': device.last_seen_at,
+        'is_current': device.device_id == current_device_id,
+    } for device in devices])
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def revoke_trusted_device(request, device_id):
+    current_device_id = device_id_from_request(request)
+    if not current_device_id or current_device_id != request.user.current_device_id:
+        return Response({'error': 'Only the main device can manage trusted devices.'}, status=status.HTTP_403_FORBIDDEN)
+    if device_id == current_device_id:
+        return Response({'error': 'The main device cannot revoke itself.'}, status=status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        device = request.user.trusted_devices.select_for_update().filter(
+            device_id=device_id, is_trusted=True, revoked_at__isnull=True,
+        ).first()
+        if not device:
+            return Response({'error': 'Trusted device not found.'}, status=status.HTTP_404_NOT_FOUND)
+        device.is_trusted = False
+        device.revoked_at = timezone.now()
+        device.save(update_fields=['is_trusted', 'revoked_at'])
+        PushDevice.objects.filter(user=request.user, device_id=device_id, active=True).update(active=False)
+    create_notification(request.user, 'device_revoked', {
+        'type': 'device_revoked',
+        'target_device_id': device_id,
+        'device_id': device_id,
+        'title': 'Device signed out',
+        'message': 'This device was signed out remotely.',
+    })
+    return Response({'revoked': True, 'device_id': device_id})
 
 
 class OtpChallengeRequestView(APIView):

@@ -26,6 +26,8 @@ def create_notification_record(user, notification_type, payload):
         'payment_request_paid': 'Payment request paid',
         'payment_request_expired': 'Payment request expired',
         'device_signed_in_elsewhere': 'Security notice',
+        'new_device_login': 'Approve new device sign-in',
+        'device_revoked': 'Device signed out',
     }.get(notification_type, 'DSD PAY'))
     payload.setdefault('message', _notification_message(notification_type, payload))
     return Notification.objects.create(
@@ -54,6 +56,10 @@ def _notification_message(notification_type, payload):
         return f"Your request for {amount} {currency} expired. Send a new request if you still need payment."
     if notification_type == 'device_signed_in_elsewhere':
         return f"A new device signed in to your wallet. Please verify your account if this was not you."
+    if notification_type == 'new_device_login':
+        return f"Approve sign-in from {payload.get('new_device_name', 'a new device')}."
+    if notification_type == 'device_revoked':
+        return 'This device was signed out remotely.'
     if notification_type == 'parental_link_approved':
         return f"{payload.get('child_display_name', 'Your child')} approved the parental link."
     if notification_type == 'parental_link_declined':
@@ -78,7 +84,7 @@ def deliver_notification(notification_id):
 
     if notification.type.startswith((
         'transfer_', 'payment_request_', 'split_request_', 'parental_',
-        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'incoming_transfer', 'device_signed_in_elsewhere'
+        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'incoming_transfer', 'device_signed_in_elsewhere', 'new_device_login'
     )):
         _send_push(notification)
 
@@ -141,6 +147,9 @@ def _send_push(notification):
         firebase_admin.initialize_app(credential)
 
     devices = PushDevice.objects.filter(user=notification.user, active=True)
+    target_device_id = payload.get('target_device_id')
+    if target_device_id:
+        devices = devices.filter(device_id=target_device_id)
     if not devices.exists():
         return
 

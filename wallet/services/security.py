@@ -3,6 +3,10 @@ import hmac
 import json
 import os
 import secrets
+import base64
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, padding
 from datetime import timedelta
 from pathlib import Path
 
@@ -23,7 +27,7 @@ def device_id_from_request(request):
     return (request.META.get('HTTP_X_DEVICE_ID') or request.META.get('HTTP_DEVICE_ID') or '').strip()
 
 
-def get_or_create_device(user, device_id, *, platform='', device_name=''):
+def get_or_create_device(user, device_id, *, platform='', device_name='', public_key_pem=''):
     if not device_id:
         return None
     existing = TrustedDevice.objects.filter(device_id=device_id).first()
@@ -35,11 +39,45 @@ def get_or_create_device(user, device_id, *, platform='', device_name=''):
             'user': user,
             'platform': platform,
             'device_name': device_name,
+            'public_key_pem': public_key_pem or (existing.public_key_pem if existing else ''),
             'is_trusted': True,
             'revoked_at': None,
         },
     )
     return device
+
+
+def verify_device_signature(request, user, body=None):
+    """Verify a short-lived RSA signature from the authenticated trusted device."""
+    device_id = device_id_from_request(request)
+    timestamp = (request.META.get('HTTP_X_TIMESTAMP') or '').strip()
+    signature = (request.META.get('HTTP_X_SIGNATURE') or '').strip()
+    if not all((device_id, timestamp, signature)):
+        return None, 'Missing device signature headers.'
+    try:
+        timestamp_value = int(timestamp)
+    except ValueError:
+        return None, 'Invalid request timestamp.'
+    if abs(int(timezone.now().timestamp()) - timestamp_value) > 60:
+        return None, 'Stale request timestamp.'
+    device = user.trusted_devices.filter(device_id=device_id, is_trusted=True, revoked_at__isnull=True).first()
+    if not device or not device.public_key_pem:
+        return None, 'This device has no registered signing key.'
+    raw_body = request.body if body is None else body
+    body_hash = hashlib.sha256(raw_body).hexdigest()
+    payload = f'{request.method}|{request.path}|{timestamp}|{body_hash}'.encode()
+    try:
+        try:
+            public_key = serialization.load_pem_public_key(device.public_key_pem.encode())
+            public_key.verify(base64.b64decode(signature, validate=True), payload, padding.PKCS1v15(), hashes.SHA256())
+        except ValueError:
+            public_key = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(device.public_key_pem, validate=True))
+            public_key.verify(base64.b64decode(signature, validate=True), payload)
+    except (ValueError, TypeError, InvalidSignature):
+        return None, 'Invalid device signature.'
+    device.last_seen_at = timezone.now()
+    device.save(update_fields=['last_seen_at'])
+    return device, None
 
 
 def _request_metadata(request):
