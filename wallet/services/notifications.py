@@ -8,6 +8,17 @@ from wallet.models import Notification, PushDevice, TransactionApproval, User
 logger = logging.getLogger(__name__)
 
 
+def _service_account_info(value):
+    info = json.loads(value)
+    if isinstance(info, str):
+        info = json.loads(info)
+    if not isinstance(info, dict):
+        raise ValueError('Firebase service account must be a JSON object.')
+    if isinstance(info.get('private_key'), str):
+        info['private_key'] = info['private_key'].replace('\\n', '\n')
+    return info
+
+
 def create_notification_record(user, notification_type, payload):
     """Create the notification row (synchronous, inside the caller's transaction)."""
     payload = dict(payload or {})
@@ -134,17 +145,25 @@ def _send_push(notification):
         credential_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
         if credential_json:
             try:
-                credential = credentials.Certificate(json.loads(credential_json))
+                credential = credentials.Certificate(_service_account_info(credential_json))
             except (TypeError, ValueError, json.JSONDecodeError):
-                logger.exception('firebase_credentials_invalid_json')
+                logger.error('firebase_credentials_invalid')
                 return
         else:
             local_credential_path = Path(__file__).resolve().parents[2] / 'dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
             if not local_credential_path.exists():
                 logger.warning('firebase_credentials_not_configured')
                 return
-            credential = credentials.Certificate(str(local_credential_path))
-        firebase_admin.initialize_app(credential)
+            try:
+                credential = credentials.Certificate(_service_account_info(local_credential_path.read_text()))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                logger.error('firebase_local_credentials_invalid', extra={'path': str(local_credential_path)})
+                return
+        try:
+            firebase_admin.initialize_app(credential)
+        except ValueError:
+            logger.error('firebase_initialization_failed')
+            return
 
     devices = PushDevice.objects.filter(user=notification.user, active=True)
     target_device_id = payload.get('target_device_id')

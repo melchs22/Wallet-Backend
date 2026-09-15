@@ -200,14 +200,25 @@ def send_otp_push(challenge, code):
     try:
         firebase_admin.get_app()
     except ValueError:
+        from wallet.services.notifications import _service_account_info
         credential_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON', '')
         if credential_json:
-            firebase_admin.initialize_app(credentials.Certificate(json.loads(credential_json)))
+            try:
+                credential = credentials.Certificate(_service_account_info(credential_json))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return {'status': 'firebase_credentials_invalid'}
         else:
             credential_path = Path(__file__).resolve().parents[2] / 'dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
             if not credential_path.exists():
                 return {'status': 'firebase_not_configured'}
-            firebase_admin.initialize_app(credentials.Certificate(str(credential_path)))
+            try:
+                credential = credentials.Certificate(_service_account_info(credential_path.read_text()))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                return {'status': 'firebase_credentials_invalid'}
+        try:
+            firebase_admin.initialize_app(credential)
+        except ValueError:
+            return {'status': 'firebase_initialization_failed'}
 
     if not challenge.device_id:
         return {'status': 'device_not_registered'}
