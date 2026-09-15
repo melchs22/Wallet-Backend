@@ -27,7 +27,7 @@ from .views import (
 from .approval_views import list_pending_approvals, approve_transaction, decline_transaction
 from .parental_views import (
     link_child_account, verify_parental_link, list_child_accounts, list_parent_accounts,
-    get_child_balance, get_child_transactions, send_to_child, update_parental_permissions, revoke_parental_control
+    get_child_balance, get_child_transactions, send_to_child, set_child_wallet_status, update_parental_permissions, revoke_parental_control
 )
 from . import admin_views
 
@@ -205,6 +205,7 @@ urlpatterns = [
     path('parental/<int:child_id>/balance', get_child_balance, name='get_child_balance'),
     path('parental/<int:child_id>/transactions', get_child_transactions, name='get_child_transactions'),
     path('parental/<int:child_id>/send', send_to_child, name='send_to_child'),
+    path('parental/<int:child_id>/wallet-status', set_child_wallet_status, name='set_child_wallet_status'),
     path('parental/<int:control_id>/permissions', update_parental_permissions, name='update_parental_permissions'),
     path('parental/<int:control_id>/revoke', revoke_parental_control, name='revoke_parental_control'),
 ]

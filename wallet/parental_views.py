@@ -214,7 +214,8 @@ def get_child_balance(request, child_id):
     
     return Response({
         'balance': str(wallet.get_balance()),
-        'currency': wallet.currency
+        'currency': wallet.currency,
+        'status': wallet.status,
     })
 
 
@@ -298,6 +299,25 @@ def send_to_child(request, child_id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def set_child_wallet_status(request, child_id):
+    try:
+        parental_control = ParentalControl.objects.get(
+            parent=request.user, child_id=child_id,
+            status=ParentalControl.Status.ACTIVE, can_control_balance=True,
+        )
+    except ParentalControl.DoesNotExist:
+        return Response({'code': 'parental_restriction', 'error': 'You are not allowed to control this child account.'}, status=403)
+    wallet = getattr(parental_control.child, 'wallet', None)
+    requested_status = request.data.get('status')
+    if wallet is None or requested_status not in ('active', 'frozen'):
+        return Response({'error': 'A valid wallet status is required.'}, status=400)
+    wallet.status = requested_status
+    wallet.save(update_fields=['status'])
+    return Response({'status': wallet.status})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def update_parental_permissions(request, control_id):
     """
     Update parental control permissions.
@@ -316,21 +336,24 @@ def update_parental_permissions(request, control_id):
         return Response(serializer.errors, status=400)
     
     # Update permissions
+    limit_fields = {'send_limit_per_tx', 'send_limit_daily'}
+    if limit_fields.intersection(serializer.validated_data) and not parental_control.can_set_limits:
+        return Response({'code': 'parental_restriction', 'error': 'You are not allowed to change this child account\'s spending limits.'}, status=403)
     for field, value in serializer.validated_data.items():
         if field in {'can_view_transactions', 'can_control_balance', 'can_send_money', 'can_set_limits'}:
             setattr(parental_control, field, value)
 
     child = parental_control.child
-    if 'send_limit_per_tx' in request.data:
+    if 'send_limit_per_tx' in serializer.validated_data:
         try:
-            child.send_limit_per_tx = Decimal(str(request.data['send_limit_per_tx']))
+            child.send_limit_per_tx = serializer.validated_data['send_limit_per_tx']
             child.limits_manually_set = True
             child.save(update_fields=['send_limit_per_tx', 'limits_manually_set'])
         except Exception:
             return Response({'error': 'send_limit_per_tx must be a valid decimal amount'}, status=400)
-    if 'send_limit_daily' in request.data:
+    if 'send_limit_daily' in serializer.validated_data:
         try:
-            child.send_limit_daily = Decimal(str(request.data['send_limit_daily']))
+            child.send_limit_daily = serializer.validated_data['send_limit_daily']
             child.limits_manually_set = True
             child.save(update_fields=['send_limit_daily', 'limits_manually_set'])
         except Exception:

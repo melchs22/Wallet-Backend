@@ -17,14 +17,22 @@ class UserSerializer(serializers.ModelSerializer):
     is_staff = serializers.BooleanField(read_only=True)
     must_change_password = serializers.BooleanField(read_only=True)
     has_transaction_pin = serializers.SerializerMethodField()
+    is_child_account = serializers.SerializerMethodField()
+    is_parent_account = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'phone_number', 'primary_phone_number', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff', 'must_change_password', 'has_transaction_pin']
+        fields = ['id', 'email', 'phone_number', 'primary_phone_number', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff', 'must_change_password', 'has_transaction_pin', 'is_child_account', 'is_parent_account']
         read_only_fields = ['id', 'kyc_tier', 'status', 'is_staff', 'must_change_password']
 
     def get_has_transaction_pin(self, obj):
         return bool(obj.transaction_pin)
+
+    def get_is_child_account(self, obj):
+        return obj.parent_accounts.filter(status='active').exists()
+
+    def get_is_parent_account(self, obj):
+        return obj.child_accounts.filter(status='active').exists()
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -813,15 +821,23 @@ class ParentalControlSerializer(serializers.ModelSerializer):
     parent_display_name = serializers.CharField(source='parent.display_name', read_only=True)
     child_email = serializers.EmailField(source='child.email', read_only=True)
     child_display_name = serializers.CharField(source='child.display_name', read_only=True)
+    child_balance = serializers.SerializerMethodField()
+    child_send_limit_per_tx = serializers.DecimalField(source='child.send_limit_per_tx', max_digits=20, decimal_places=2, read_only=True)
+    child_send_limit_daily = serializers.DecimalField(source='child.send_limit_daily', max_digits=20, decimal_places=2, read_only=True)
     
     class Meta:
         model = ParentalControl
         fields = [
             'id', 'parent_id', 'child_id', 'parent_email', 'parent_display_name', 'child_email', 'child_display_name',
             'status', 'can_view_transactions', 'can_control_balance', 'can_send_money', 'can_set_limits',
+            'child_balance', 'child_send_limit_per_tx', 'child_send_limit_daily',
             'linked_at', 'created_at'
         ]
         read_only_fields = fields
+
+    def get_child_balance(self, obj):
+        wallet = getattr(obj.child, 'wallet', None)
+        return str(wallet.get_balance()) if wallet else None
 
 
 class ParentalControlLinkSerializer(serializers.Serializer):
@@ -846,6 +862,8 @@ class ParentalControlUpdateSerializer(serializers.Serializer):
     can_control_balance = serializers.BooleanField(required=False)
     can_send_money = serializers.BooleanField(required=False)
     can_set_limits = serializers.BooleanField(required=False)
+    send_limit_per_tx = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=0, required=False)
+    send_limit_daily = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=0, required=False)
 
 
 class PinVerifySerializer(serializers.Serializer):
