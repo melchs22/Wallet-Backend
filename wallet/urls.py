@@ -21,7 +21,7 @@ from .views import (
     create_merchant_account, get_merchant_account, generate_merchant_qr,
     merchant_dashboard, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
     merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant,
-    supported_countries, legal_document, legal_document_html, provider_catalog,
+    supported_countries, app_update_status, legal_document, legal_document_html, provider_catalog,
     change_password, UserKYCSubmissionView, login_status, confirm_login, trusted_devices, revoke_trusted_device
 )
 from .approval_views import list_pending_approvals, approve_transaction, decline_transaction
@@ -39,6 +39,7 @@ urlpatterns = [
     path('auth/login', EmailLoginView.as_view(), name='email_login'),
     path('auth/change-password', change_password, name='change_password'),
     path('countries', supported_countries, name='supported_countries'),
+    path('app/update-status', app_update_status, name='app_update_status'),
     path('legal/<slug:slug>', legal_document, name='legal_document'),
     path('legal/<slug:slug>/html', legal_document_html, name='legal_document_html'),
     path('mobile-money/provider-catalog', provider_catalog, name='provider_catalog'),

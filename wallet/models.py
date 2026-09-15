@@ -576,6 +576,27 @@ class SystemSetting(models.Model):
         return self.key
 
 
+class AppUpdatePolicy(models.Model):
+    class Platform(models.TextChoices):
+        IOS = 'ios', 'iOS'
+        ANDROID = 'android', 'Android'
+
+    platform = models.CharField(max_length=10, choices=Platform.choices, unique=True)
+    minimum_version = models.CharField(max_length=30, default='1.0.0')
+    update_url = models.URLField(max_length=500)
+    enabled = models.BooleanField(default=False)
+    title = models.CharField(max_length=120, default='Update required')
+    message = models.TextField(default='Please update the app to continue.')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'app_update_policies'
+        ordering = ['platform']
+
+    def __str__(self):
+        return f'{self.get_platform_display()} update policy'
+
+
 class ProcessedRequest(models.Model):
     """
     This table enforces idempotency at the database level.

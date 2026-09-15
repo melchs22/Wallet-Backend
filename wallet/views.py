@@ -25,7 +25,7 @@ import hashlib
 import base64
 from django.conf import settings
 from .models import (
-    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
+    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent, AppUpdatePolicy,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
@@ -221,6 +221,34 @@ class EmailSignupView(APIView):
 @permission_classes([AllowAny])
 def supported_countries(request):
     return Response(SupportedCountrySerializer(SupportedCountry.objects.filter(active=True), many=True).data)
+
+
+def _version_parts(value):
+    try:
+        return tuple(int(part) for part in str(value).strip().split('.')[:3])
+    except (TypeError, ValueError):
+        return (0, 0, 0)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def app_update_status(request):
+    platform = (request.query_params.get('platform') or '').strip().lower()
+    version = request.query_params.get('version') or '0.0.0'
+    if platform not in {AppUpdatePolicy.Platform.IOS, AppUpdatePolicy.Platform.ANDROID}:
+        return Response({'update_required': False})
+    policy = AppUpdatePolicy.objects.filter(platform=platform, enabled=True).first()
+    required = bool(policy and _version_parts(version) < _version_parts(policy.minimum_version))
+    if not required:
+        return Response({'update_required': False})
+    return Response({
+        'update_required': True,
+        'platform': platform,
+        'minimum_version': policy.minimum_version,
+        'title': policy.title,
+        'message': policy.message,
+        'update_url': policy.update_url,
+    })
 
 
 @api_view(['GET'])

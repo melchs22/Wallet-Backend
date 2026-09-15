@@ -10,7 +10,7 @@ from .models import (
     MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
     PushDevice,
     TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
-    SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission,
+    SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission, AppUpdatePolicy,
 )
 
 
@@ -395,18 +395,26 @@ class SystemSettingAdmin(admin.ModelAdmin):
     search_fields = ['key', 'description']
 
     def save_model(self, request, obj, form, change):
-        # Log the change to audit log
         obj.updated_by = request.user
         AuditLog.objects.create(
             user=request.user,
             action='system_setting_updated',
-            metadata={
-                'key': obj.key,
-                'value': obj.value,
-                'is_update': change
-            }
+            metadata={'key': obj.key, 'value': obj.value, 'is_update': change},
         )
         super().save_model(request, obj, form, change)
+
+
+@admin.register(AppUpdatePolicy)
+class AppUpdatePolicyAdmin(admin.ModelAdmin):
+    list_display = ['platform', 'enabled', 'minimum_version', 'update_url', 'updated_at']
+    list_filter = ['platform', 'enabled']
+    search_fields = ['platform', 'minimum_version', 'title']
+    fieldsets = [
+        ('Target platform', {'fields': ['platform', 'enabled']}),
+        ('Update requirement', {'fields': ['minimum_version', 'update_url', 'title', 'message']}),
+        ('Audit', {'fields': ['updated_at'], 'classes': ['collapse']}),
+    ]
+    readonly_fields = ['updated_at']
 
 
 @admin.register(MobileMoneyTransaction)
