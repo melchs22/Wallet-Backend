@@ -9,7 +9,7 @@ from .models import (
     LinkedProvider, ExchangeRate, Dispute, PaymentRequest, SplitRequest, SystemSetting,
     MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
     PushDevice,
-    TrustedDevice, OtpChallenge, MobileMoneyWebhookEvent,
+    TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
     SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission,
 )
 
@@ -169,12 +169,44 @@ class TrustedDeviceAdmin(admin.ModelAdmin):
     list_filter = ['platform', 'is_trusted']
     search_fields = ['user__email', 'user__handle', 'device_id']
     readonly_fields = ['device_id', 'first_seen_at', 'last_seen_at']
-    actions = ['revoke_devices']
+    actions = ['revoke_devices', 'reset_users_devices']
 
     @admin.action(description='Revoke selected trusted devices')
     def revoke_devices(self, request, queryset):
         count = queryset.update(is_trusted=False, revoked_at=timezone.now())
+        user_ids = set(queryset.values_list('user_id', flat=True))
+        self._reset_users_without_active_devices(user_ids)
         self.message_user(request, f'{count} trusted device(s) revoked.', messages.SUCCESS)
+
+    def _reset_users_without_active_devices(self, user_ids):
+        for user_id in user_ids:
+            has_active_device = TrustedDevice.objects.filter(
+                user_id=user_id, is_trusted=True, revoked_at__isnull=True,
+            ).exists()
+            if not has_active_device:
+                PushDevice.objects.filter(user_id=user_id).update(active=False)
+                PendingLoginRequest.objects.filter(
+                    user_id=user_id,
+                    status=PendingLoginRequest.Status.PENDING,
+                ).update(status=PendingLoginRequest.Status.EXPIRED, resolved_at=timezone.now())
+                User.objects.filter(id=user_id).update(current_device_id=None)
+
+    @admin.action(description='Reset all devices for selected users')
+    def reset_users_devices(self, request, queryset):
+        user_ids = set(queryset.values_list('user_id', flat=True))
+        TrustedDevice.objects.filter(user_id__in=user_ids).delete()
+        self._reset_users_without_active_devices(user_ids)
+        self.message_user(request, f'Device state reset for {len(user_ids)} user(s). The next login will be trusted as the first device.', messages.SUCCESS)
+
+    def delete_queryset(self, request, queryset):
+        user_ids = set(queryset.values_list('user_id', flat=True))
+        super().delete_queryset(request, queryset)
+        self._reset_users_without_active_devices(user_ids)
+
+    def delete_model(self, request, obj):
+        user_id = obj.user_id
+        super().delete_model(request, obj)
+        self._reset_users_without_active_devices({user_id})
 
 
 @admin.register(OtpChallenge)

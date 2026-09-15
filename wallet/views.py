@@ -320,6 +320,9 @@ class EmailLoginView(APIView):
             user=user, device_id=device_id, is_trusted=True, revoked_at__isnull=True,
         ).first() if device_id else None
         trusted_exists = user.trusted_devices.filter(is_trusted=True, revoked_at__isnull=True).exists()
+        if not trusted_exists and user.current_device_id:
+            user.current_device_id = None
+            user.save(update_fields=['current_device_id'])
         public_key_pem = (serializer.validated_data.get('public_key_pem') or '').strip()
         if device is None and trusted_exists:
             if not device_id or not public_key_pem:
@@ -347,6 +350,10 @@ class EmailLoginView(APIView):
                 device_name=serializer.validated_data.get('device_name', ''),
                 public_key_pem=public_key_pem,
             )
+
+        if device_id and not user.current_device_id:
+            user.current_device_id = device_id
+            user.save(update_fields=['current_device_id'])
 
         if device is None and user.current_device_id and device_id and device_id != user.current_device_id:
             previous_device = user.current_device_id
