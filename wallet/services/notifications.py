@@ -165,14 +165,21 @@ def _send_push(notification):
             logger.error('firebase_initialization_failed')
             return
 
+    payload = notification.payload or {}
     devices = PushDevice.objects.filter(user=notification.user, active=True)
+    if notification.type == 'new_device_login':
+        from wallet.models import TrustedDevice
+        trusted_ids = TrustedDevice.objects.filter(
+            user=notification.user,
+            is_trusted=True,
+            revoked_at__isnull=True,
+        ).values_list('device_id', flat=True)
+        devices = devices.filter(device_id__in=trusted_ids)
     target_device_id = payload.get('target_device_id')
     if target_device_id:
         devices = devices.filter(device_id=target_device_id)
     if not devices.exists():
         return
-
-    payload = notification.payload or {}
     message = messaging.MulticastMessage(
         tokens=list(devices.values_list('token', flat=True)),
         notification=messaging.Notification(

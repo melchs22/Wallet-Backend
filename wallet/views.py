@@ -958,7 +958,7 @@ class PushDeviceView(APIView):
                 'active': True,
             },
         )
-        if serializer.validated_data.get('device_id'):
+        if serializer.validated_data.get('device_id') and not request.user.current_device_id:
             request.user.current_device_id = serializer.validated_data['device_id']
             request.user.save(update_fields=['current_device_id'])
         return Response({'id': device.id, 'registered': True}, status=status.HTTP_200_OK)
