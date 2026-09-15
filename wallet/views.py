@@ -327,13 +327,21 @@ class EmailLoginView(APIView):
         if device is None and trusted_exists:
             if not device_id or not public_key_pem:
                 return Response({'error': 'A device ID and public signing key are required for new-device login.'}, status=status.HTTP_400_BAD_REQUEST)
-            pending = PendingLoginRequest.objects.create(
+            pending = PendingLoginRequest.objects.filter(
                 user=user,
                 new_device_id=device_id,
-                new_device_name=serializer.validated_data.get('device_name', '').strip(),
-                new_device_public_key_pem=public_key_pem,
-                requesting_ip=request.META.get('REMOTE_ADDR'),
-            )
+                status=PendingLoginRequest.Status.PENDING,
+            ).first()
+            if pending is None or pending.is_expired():
+                pending = PendingLoginRequest.objects.create(
+                    user=user,
+                    new_device_id=device_id,
+                    new_device_name=serializer.validated_data.get('device_name', '').strip(),
+                    new_device_public_key_pem=public_key_pem,
+                    requesting_ip=request.META.get('REMOTE_ADDR'),
+                )
+            else:
+                return Response({'status': 'pending_confirmation', 'request_id': str(pending.id), 'expires_in': 300}, status=status.HTTP_202_ACCEPTED)
             create_notification(user, 'new_device_login', {
                 'type': 'new_device_login',
                 'request_id': str(pending.id),
@@ -994,10 +1002,11 @@ def login_status(request, request_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def confirm_login(request):
+    raw_body = request.body
     serializer = LoginConfirmationSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    device, error = verify_device_signature(request, request.user)
+    device, error = verify_device_signature(request, request.user, body=raw_body)
     if error:
         return Response({'error': error}, status=status.HTTP_401_UNAUTHORIZED)
     with transaction.atomic():

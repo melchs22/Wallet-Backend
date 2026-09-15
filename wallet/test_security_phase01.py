@@ -1,19 +1,26 @@
+import base64
+import hashlib
+import json
 from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from rest_framework.request import Request
 from rest_framework.test import APIClient
 
 from wallet.authentication import issue_access_token
 from wallet.models import (
     MobileMoneyWebhookEvent,
     OtpChallenge,
+    TrustedDevice,
     User,
     UserStatus,
 )
 from wallet.services.security import (
     create_otp_challenge,
+    verify_device_signature,
     token_is_step_up_verified,
     valid_webhook_signature,
     verify_otp_challenge,
@@ -107,3 +114,47 @@ class WebhookSecurityTests(TestCase):
             signature='signature',
         )
         self.assertTrue(MobileMoneyWebhookEvent.objects.filter(event_id='event-1').exists())
+
+
+class DeviceSignatureTests(TestCase):
+    def test_verified_request_works_after_parsing_json_body(self):
+        user = User.objects.create_user(
+            email='device@example.com',
+            password='password-123',
+            handle='device-user',
+            display_name='Device User',
+            status=UserStatus.ACTIVE,
+        )
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        public_key = private_key.public_key()
+        public_key_b64 = base64.b64encode(public_key.public_bytes_raw()).decode()
+        TrustedDevice.objects.create(
+            user=user,
+            device_id='device-123',
+            device_name='Demo phone',
+            public_key_pem=public_key_b64,
+            is_trusted=True,
+        )
+
+        payload = {'request_id': '11111111-1111-4111-8111-111111111111', 'decision': 'approve'}
+        raw_body = json.dumps(payload).encode()
+        timestamp = str(int(timezone.now().timestamp()))
+        body_hash = hashlib.sha256(raw_body).hexdigest()
+        signed_payload = f'POST|/api/auth/login/confirm|{timestamp}|{body_hash}'.encode()
+        signature = base64.b64encode(private_key.sign(signed_payload)).decode()
+
+        request = APIClient().post(
+            '/api/auth/login/confirm',
+            data=payload,
+            format='json',
+            HTTP_X_DEVICE_ID='device-123',
+            HTTP_X_TIMESTAMP=timestamp,
+            HTTP_X_SIGNATURE=signature,
+        )
+        drf_request = Request(request)
+        self.assertEqual(drf_request.data['decision'], 'approve')
+
+        device, error = verify_device_signature(drf_request, user)
+
+        self.assertIsNone(error)
+        self.assertEqual(device.device_id, 'device-123')
