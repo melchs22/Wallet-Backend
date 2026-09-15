@@ -353,11 +353,14 @@ class EmailLoginView(APIView):
             return Response({'status': 'pending_confirmation', 'request_id': str(pending.id), 'expires_in': 300}, status=status.HTTP_202_ACCEPTED)
 
         if device is None and device_id:
-            get_or_create_device(
-                user, device_id,
-                device_name=serializer.validated_data.get('device_name', ''),
-                public_key_pem=public_key_pem,
-            )
+            try:
+                get_or_create_device(
+                    user, device_id,
+                    device_name=serializer.validated_data.get('device_name', ''),
+                    public_key_pem=public_key_pem,
+                )
+            except ValueError as error:
+                return Response({'error': str(error)}, status=status.HTTP_409_CONFLICT)
 
         if device_id and not user.current_device_id:
             user.current_device_id = device_id
@@ -1028,11 +1031,18 @@ def confirm_login(request):
         pending.resolved_at = timezone.now()
         pending.save(update_fields=['status', 'resolved_by_device', 'resolved_at'])
     if pending.status == PendingLoginRequest.Status.APPROVED:
-        get_or_create_device(
-            request.user, pending.new_device_id,
-            device_name=pending.new_device_name,
-            public_key_pem=pending.new_device_public_key_pem,
-        )
+        try:
+            get_or_create_device(
+                request.user, pending.new_device_id,
+                device_name=pending.new_device_name,
+                public_key_pem=pending.new_device_public_key_pem,
+            )
+        except ValueError as error:
+            PendingLoginRequest.objects.filter(pk=pending.pk).update(
+                status=PendingLoginRequest.Status.DENIED,
+                resolved_at=timezone.now(),
+            )
+            return Response({'error': str(error)}, status=status.HTTP_409_CONFLICT)
     return Response({'status': pending.status})
 
 
@@ -1040,8 +1050,6 @@ def confirm_login(request):
 @permission_classes([IsAuthenticated])
 def trusted_devices(request):
     current_device_id = device_id_from_request(request)
-    if not current_device_id or current_device_id != request.user.current_device_id:
-        return Response({'error': 'Only the main device can manage trusted devices.'}, status=status.HTTP_403_FORBIDDEN)
     devices = request.user.trusted_devices.filter(is_trusted=True, revoked_at__isnull=True)
     return Response([{
         'device_id': device.device_id,
