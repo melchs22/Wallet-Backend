@@ -160,6 +160,18 @@ urlpatterns = [
     path('admin/parental-controls', admin_views.admin_parental_controls_list, name='admin_parental_controls_list'),
     path('admin/parental-controls/<int:control_id>', admin_views.admin_parental_control_update, name='admin_parental_control_update'),
 
+    # New Production-Ready Admin Endpoints
+    path('admin/analytics', admin_views.admin_analytics, name='admin_analytics'),
+    path('admin/users/<int:user_id>/notes', admin_views.admin_user_notes, name='admin_user_notes'),
+    path('admin/users/bulk-action', admin_views.admin_bulk_user_action, name='admin_bulk_user_action'),
+    path('admin/transactions/<str:transaction_id>/flags', admin_views.admin_transaction_flags, name='admin_transaction_flags'),
+    path('admin/system/health', admin_views.admin_system_health, name='admin_system_health'),
+    path('admin/alerts/rules', admin_views.admin_alert_rules, name='admin_alert_rules'),
+    path('admin/settlements', admin_views.admin_settlements, name='admin_settlements'),
+    path('admin/reports', admin_views.admin_reports, name='admin_reports'),
+    path('admin/system/operations', admin_views.admin_system_operations, name='admin_system_operations'),
+    path('admin/communications', admin_views.admin_communications, name='admin_communications'),
+
     # Core admin CRUD API
     path('admin/crud/users', admin_api.admin_users_crud, name='admin_crud_users'),
     path('admin/crud/users/<int:user_id>', admin_api.admin_user_crud_detail, name='admin_crud_user_detail'),

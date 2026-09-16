@@ -1,6 +1,6 @@
 export default {
   'pages.layouts.userLayout.title':
-    'Ant Design is the most influential web design specification in Xihu district',
+    'DSD Pay Admin Panel',
   'pages.login.accountLogin.tab': 'Account Login',
   'pages.login.accountLogin.errorMessage':
     'Incorrect username/password(admin/ant.design)',

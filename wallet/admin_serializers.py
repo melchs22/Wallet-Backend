@@ -4,7 +4,8 @@ from django_celery_beat.models import PeriodicTask
 from wallet.models import (
     SupportTicket, SupportTicketMessage, SupportTicketStatus, SupportTicketPriority, SupportTicketCategory,
     UserKYCSubmission, MobileMoneyTransaction, WebhookDelivery, Settlement,
-    TransferFeeRule, FeeWaiver, ExchangeRate, Merchant, Transaction
+    TransferFeeRule, FeeWaiver, ExchangeRate, Merchant, Transaction,
+    UserNote, TransactionFlag, AlertRule, AlertEvent, AdminMessage
 )
 from wallet.serializers import UserSerializer, TransactionDetailSerializer
 
@@ -176,3 +177,88 @@ class ExchangeRateAdminSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExchangeRate
         fields = ['id', 'from_currency', 'to_currency', 'rate', 'source', 'valid_from', 'valid_until', 'created_at']
+
+
+# ============================================================================
+# NEW PRODUCTION-READY SERIALIZERS
+# ============================================================================
+
+class UserNoteSerializer(serializers.ModelSerializer):
+    admin = UserSerializer(read_only=True)
+
+    class Meta:
+        model = UserNote
+        fields = ['id', 'user', 'admin', 'note', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'admin', 'created_at', 'updated_at']
+
+
+class UserNoteCreateSerializer(serializers.Serializer):
+    note = serializers.CharField(required=True)
+
+
+class TransactionFlagSerializer(serializers.ModelSerializer):
+    created_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = TransactionFlag
+        fields = ['id', 'transaction', 'flag_type', 'flag_name', 'description', 'created_by', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_at']
+
+
+class TransactionFlagCreateSerializer(serializers.Serializer):
+    flag_id = serializers.IntegerField(required=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class AlertRuleSerializer(serializers.ModelSerializer):
+    created_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = AlertRule
+        fields = [
+            'id', 'name', 'description', 'alert_type', 'condition', 'threshold',
+            'channels', 'enabled', 'last_triggered', 'trigger_count', 'created_by',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'last_triggered', 'trigger_count', 'created_by', 'created_at', 'updated_at']
+
+
+class AlertRuleCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100, required=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+    alert_type = serializers.ChoiceField(choices=['warning', 'critical', 'info'], default='warning')
+    condition = serializers.CharField(required=True)
+    threshold = serializers.CharField(max_length=100, required=True)
+    channels = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+
+
+class AlertEventSerializer(serializers.ModelSerializer):
+    rule = AlertRuleSerializer(read_only=True)
+    resolved_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = AlertEvent
+        fields = [
+            'id', 'rule', 'severity', 'message', 'metadata', 'resolved',
+            'resolved_at', 'resolved_by', 'created_at'
+        ]
+        read_only_fields = fields
+
+
+class AdminMessageSerializer(serializers.ModelSerializer):
+    recipient = UserSerializer(read_only=True)
+    sender = UserSerializer(read_only=True)
+
+    class Meta:
+        model = AdminMessage
+        fields = [
+            'id', 'recipient', 'sender', 'subject', 'content', 'status',
+            'delivery_error', 'created_at', 'read_at'
+        ]
+        read_only_fields = ['id', 'recipient', 'sender', 'created_at', 'read_at']
+
+
+class AdminMessageCreateSerializer(serializers.Serializer):
+    recipient_handle = serializers.CharField(max_length=100, required=True)
+    subject = serializers.CharField(max_length=200, required=True)
+    content = serializers.CharField(required=True)

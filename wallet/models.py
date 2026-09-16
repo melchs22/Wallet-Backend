@@ -1391,3 +1391,138 @@ class SupportTicketMessage(models.Model):
     def __str__(self):
         return f"Msg on {self.ticket.ticket_number} by {self.sender.handle}"
 
+
+# ============================================================================
+# NEW PRODUCTION-READY MODELS
+# ============================================================================
+
+class UserNote(models.Model):
+    """Internal admin notes on users for collaboration and tracking."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='admin_notes')
+    admin = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notes_authored')
+    note = models.TextField(help_text="Internal note about this user")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'user_notes'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Note on {self.user.handle} by {self.admin.handle}"
+
+
+class TransactionFlag(models.Model):
+    """Flags and tags for transaction categorization and tracking."""
+    FLAG_TYPES = [
+        ('flag', 'Flag'),
+        ('tag', 'Tag'),
+        ('priority', 'Priority'),
+    ]
+    
+    FLAG_NAMES = [
+        ('high_risk', 'High Risk'),
+        ('requires_review', 'Requires Review'),
+        ('suspicious', 'Suspicious'),
+        ('vip', 'VIP'),
+        ('priority', 'Priority'),
+        ('compliance', 'Compliance'),
+        ('fraud_investigation', 'Fraud Investigation'),
+    ]
+    
+    transaction = models.ForeignKey(Transaction, on_delete=models.CASCADE, related_name='flags')
+    flag_type = models.CharField(max_length=20, choices=FLAG_TYPES, default='flag')
+    flag_name = models.CharField(max_length=50, choices=FLAG_NAMES)
+    description = models.TextField(blank=True, help_text="Additional context for this flag")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='flags_created')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'transaction_flags'
+        ordering = ['-created_at']
+        unique_together = [['transaction', 'flag_name']]
+
+    def __str__(self):
+        return f"{self.flag_name} on {self.transaction.id}"
+
+
+class AlertRule(models.Model):
+    """Configurable alert rules for system monitoring."""
+    ALERT_TYPES = [
+        ('warning', 'Warning'),
+        ('critical', 'Critical'),
+        ('info', 'Info'),
+    ]
+    
+    CHANNELS = [
+        ('email', 'Email'),
+        ('webhook', 'Webhook'),
+        ('sms', 'SMS'),
+        ('slack', 'Slack'),
+    ]
+    
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    alert_type = models.CharField(max_length=20, choices=ALERT_TYPES, default='warning')
+    condition = models.TextField(help_text="Python-like condition expression")
+    threshold = models.CharField(max_length=100, help_text="Threshold value for condition")
+    channels = models.JSONField(default=list, help_text="List of notification channels")
+    enabled = models.BooleanField(default=True)
+    last_triggered = models.DateTimeField(null=True, blank=True)
+    trigger_count = models.IntegerField(default=0)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='alert_rules_created')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'alert_rules'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class AlertEvent(models.Model):
+    """Log of triggered alert events."""
+    rule = models.ForeignKey(AlertRule, on_delete=models.CASCADE, related_name='events')
+    severity = models.CharField(max_length=20)
+    message = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    resolved = models.BooleanField(default=False)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='alerts_resolved')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'alert_events'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.rule.name} - {self.created_at}"
+
+
+class AdminMessage(models.Model):
+    """Direct messages from admins to users."""
+    STATUS_CHOICES = [
+        ('sent', 'Sent'),
+        ('delivered', 'Delivered'),
+        ('read', 'Read'),
+        ('failed', 'Failed'),
+    ]
+    
+    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='admin_messages_received')
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='admin_messages_sent')
+    subject = models.CharField(max_length=200)
+    content = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='sent')
+    delivery_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'admin_messages'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Message to {self.recipient.handle}: {self.subject}"
+

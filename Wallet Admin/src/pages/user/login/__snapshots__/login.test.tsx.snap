@@ -68,7 +68,7 @@ exports[`Login Page should login success 1`] = `
             <div
               class="ant-pro-form-login-desc"
             >
-              Ant Design is the most influential web design specification in Xihu district
+              DSD Pay Admin Panel
             </div>
           </div>
           <div
@@ -640,7 +640,7 @@ exports[`Login Page should show login form 1`] = `
             <div
               class="ant-pro-form-login-desc"
             >
-              Ant Design is the most influential web design specification in Xihu district
+              DSD Pay Admin Panel
             </div>
           </div>
           <div
