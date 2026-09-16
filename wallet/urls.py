@@ -30,6 +30,7 @@ from .parental_views import (
     get_child_balance, get_child_transactions, send_to_child, set_child_wallet_status, update_parental_permissions, revoke_parental_control
 )
 from . import admin_views
+from . import admin_api
 
 
 urlpatterns = [
@@ -152,6 +153,16 @@ urlpatterns = [
 
     # Admin Team Management
     path('admin/team', admin_views.admin_team_list, name='admin_team_list'),
+
+    # Core admin CRUD API
+    path('admin/crud/users', admin_api.admin_users_crud, name='admin_crud_users'),
+    path('admin/crud/users/<int:user_id>', admin_api.admin_user_crud_detail, name='admin_crud_user_detail'),
+    path('admin/crud/wallets', admin_api.admin_wallets_crud, name='admin_crud_wallets'),
+    path('admin/crud/wallets/<int:wallet_id>', admin_api.admin_wallet_crud_detail, name='admin_crud_wallet_detail'),
+    path('admin/crud/transactions', admin_api.admin_transactions_crud, name='admin_crud_transactions'),
+    path('admin/crud/transactions/<str:transaction_id>', admin_api.admin_transaction_crud_detail, name='admin_crud_transaction_detail'),
+    path('admin/crud/tasks', admin_api.admin_periodic_tasks_crud, name='admin_crud_tasks'),
+    path('admin/crud/tasks/<int:task_id>', admin_api.admin_periodic_task_crud_detail, name='admin_crud_task_detail'),
 
     
     # Disputes

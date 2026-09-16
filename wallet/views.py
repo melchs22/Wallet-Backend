@@ -994,6 +994,7 @@ class PushDeviceView(APIView):
                 'user': request.user,
                 'device_id': serializer.validated_data.get('device_id', ''),
                 'platform': serializer.validated_data.get('platform', ''),
+                'device_name': serializer.validated_data.get('device_name', ''),
                 'active': True,
             },
         )
@@ -1081,7 +1082,7 @@ def trusted_devices(request):
     devices = request.user.trusted_devices.filter(is_trusted=True, revoked_at__isnull=True)
     return Response([{
         'device_id': device.device_id,
-        'device_name': device.device_name or 'Trusted device',
+        'device_name': device.device_name or device.platform.title() or 'Trusted device',
         'platform': device.platform,
         'last_seen_at': device.last_seen_at,
         'is_current': device.device_id == current_device_id,

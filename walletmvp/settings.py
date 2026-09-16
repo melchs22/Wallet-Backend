@@ -217,8 +217,8 @@ if TESTING:
 
 # DRF Spectacular configuration for OpenAPI schema
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Wallet MVP API',
-    'DESCRIPTION': 'P2P wallet backend for Venmo-style payments',
+    'TITLE': 'DSD Wallet API',
+    'DESCRIPTION': 'API for the Wallet MVP application, providing endpoints for user authentication, wallet management, transfers, notifications, and admin operations.',
     'VERSION': '2.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
@@ -263,8 +263,6 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 
 # CSRF configuration
-# For cross-origin API with session authentication, we disable CSRF for API endpoints
-# Session cookies provide sufficient protection for this use case
 CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', False)
 CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
 CSRF_COOKIE_HTTPONLY = True
@@ -277,17 +275,14 @@ CSRF_TRUSTED_ORIGINS = getenv_list(
     ],
 )
 
-# Exempt API endpoints from CSRF protection (they use session auth which is sufficient)
 CSRF_EXEMPT_URLS = [
     r'^/api/',
 ]
 
 
-# Google OAuth configuration
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 
-# QR Code signing secret for HMAC-signed payloads
 QR_SIGNING_SECRET = os.getenv('QR_SIGNING_SECRET', 'change-this-qr-secret-in-production-12345')
 MOBILE_MONEY_WEBHOOK_SECRET = os.getenv('MOBILE_MONEY_WEBHOOK_SECRET', '')
 

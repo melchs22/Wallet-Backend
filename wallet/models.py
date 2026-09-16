@@ -466,6 +466,7 @@ class PushDevice(models.Model):
     token = models.CharField(max_length=512, unique=True)
     device_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
     platform = models.CharField(max_length=20, blank=True, default='')
+    device_name = models.CharField(max_length=120, blank=True, default='')
     active = models.BooleanField(default=True)
     last_seen_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
