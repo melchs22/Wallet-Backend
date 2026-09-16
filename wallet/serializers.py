@@ -525,14 +525,18 @@ class AdminUserDetailSerializer(serializers.ModelSerializer):
     recent_transactions = serializers.SerializerMethodField()
     recent_transfer_attempts = serializers.SerializerMethodField()
     linked_providers = serializers.SerializerMethodField()
+    push_devices = serializers.SerializerMethodField()
+    trusted_devices = serializers.SerializerMethodField()
+    parental_controls = serializers.SerializerMethodField()
     
     class Meta:
         model = User
         fields = [
             'id', 'email', 'handle', 'display_name', 'avatar_url', 'status', 'kyc_tier',
             'send_limit_per_tx', 'send_limit_daily', 'balance', 'wallet_status',
-            'is_staff', 'is_agent', 'created_at', 'recent_transactions', 
-            'recent_transfer_attempts', 'linked_providers'
+            'is_staff', 'is_agent', 'created_at', 'recent_transactions',
+            'recent_transfer_attempts', 'linked_providers', 'push_devices',
+            'trusted_devices', 'parental_controls'
         ]
         read_only_fields = ['id', 'created_at', 'is_staff']
     
@@ -552,6 +556,19 @@ class AdminUserDetailSerializer(serializers.ModelSerializer):
     
     def get_linked_providers(self, obj):
         return LinkedProviderSerializer(obj.linked_providers.all(), many=True).data
+
+    def get_push_devices(self, obj):
+        return list(obj.push_devices.values('id', 'device_id', 'device_name', 'platform', 'active', 'last_seen_at', 'created_at'))
+
+    def get_trusted_devices(self, obj):
+        return list(obj.trusted_devices.values('id', 'device_id', 'device_name', 'platform', 'is_trusted', 'revoked_at', 'first_seen_at', 'last_seen_at'))
+
+    def get_parental_controls(self, obj):
+        controls = list(obj.child_accounts.select_related('child').values(
+            'id', 'child_id', 'child__handle', 'status', 'can_view_transactions',
+            'can_control_balance', 'can_send_money', 'can_set_limits', 'linked_at', 'created_at'
+        ))
+        return controls
 
 
 class AdminUserUpdateSerializer(serializers.Serializer):

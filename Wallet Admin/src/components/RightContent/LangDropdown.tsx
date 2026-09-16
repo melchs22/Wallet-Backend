@@ -7,14 +7,8 @@ import HeaderDropdown from '../HeaderDropdown';
 import useHeaderActionStyles from './style';
 
 const localeLabelMap: Record<string, { emoji: string; label: string }> = {
-  'zh-CN': { emoji: '🇨🇳', label: '简体中文' },
-  'zh-TW': { emoji: '🇭🇰', label: '繁體中文' },
   'en-US': { emoji: '🇺🇸', label: 'English' },
-  'ja-JP': { emoji: '🇯🇵', label: '日本語' },
-  'pt-BR': { emoji: '🇧🇷', label: 'Português' },
-  'id-ID': { emoji: '🇮🇩', label: 'Bahasa Indonesia' },
-  'fa-IR': { emoji: '🇮🇷', label: 'فارسی' },
-  'bn-BD': { emoji: '🇧🇩', label: 'বাংলা' },
+  'fr-FR': { emoji: '🇫🇷', label: 'Français' },
 };
 
 const onLangClick: MenuProps['onClick'] = ({ key }) => {

@@ -153,6 +153,12 @@ urlpatterns = [
 
     # Admin Team Management
     path('admin/team', admin_views.admin_team_list, name='admin_team_list'),
+    path('admin/devices/push', admin_views.admin_push_devices_list, name='admin_push_devices_list'),
+    path('admin/devices/push/<int:device_id>/toggle', admin_views.admin_push_device_toggle, name='admin_push_device_toggle'),
+    path('admin/devices/trusted', admin_views.admin_trusted_devices_list, name='admin_trusted_devices_list'),
+    path('admin/devices/trusted/<int:device_id>/revoke', admin_views.admin_trusted_device_revoke, name='admin_trusted_device_revoke'),
+    path('admin/parental-controls', admin_views.admin_parental_controls_list, name='admin_parental_controls_list'),
+    path('admin/parental-controls/<int:control_id>', admin_views.admin_parental_control_update, name='admin_parental_control_update'),
 
     # Core admin CRUD API
     path('admin/crud/users', admin_api.admin_users_crud, name='admin_crud_users'),

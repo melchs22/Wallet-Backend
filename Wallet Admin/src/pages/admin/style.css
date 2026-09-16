@@ -12,7 +12,12 @@
 .metric-card .ant-statistic-title { color: var(--muted); }
 .metric-card .ant-statistic-content { color: var(--ink); font-size: 26px; }
 .overview-grid { margin-top: 16px; }
+.overview-grid .ant-card-extra { display: none; }
 .quick-actions { width: 100%; }
+.visual-chart { height: 220px; display: flex; align-items: flex-end; gap: 14px; padding: 24px 16px 28px; border-bottom: 1px solid #e8edf0; background: linear-gradient(180deg, #f7fbfa, #fff); }
+.chart-axis { align-self: stretch; display: flex; flex-direction: column; justify-content: space-between; margin-right: auto; color: #84919b; font-size: 12px; }
+.chart-bar { width: 8%; min-height: 24px; position: relative; border-radius: 6px 6px 0 0; background: linear-gradient(180deg, #2b8b80, #84c9ae); }
+.chart-bar span { position: absolute; top: calc(100% + 10px); left: 50%; transform: translateX(-50%); color: #84919b; font-size: 11px; }
 .health-list { margin-top: 24px; padding-top: 18px; border-top: 1px solid #edf0f2; }
 .drawer-action { margin-top: 24px; }
 .resource-toolbar { margin-bottom: 16px; }

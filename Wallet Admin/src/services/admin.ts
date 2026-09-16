@@ -2,7 +2,7 @@ import { request } from '@umijs/max';
 
 export type DashboardStats = { total_users: number; active_users: number; suspended_users: number; closed_users: number; total_wallets: number; p2p_volume_today: string; p2p_volume_week: string; pending_payment_requests: number; frozen_wallets: number; transfer_attempt_rejections_24h: number };
 export type AdminUser = { id: number; handle?: string; display_name?: string; email?: string; primary_phone_number?: string; status?: string; kyc_tier?: string; is_staff?: boolean; created_at?: string; wallet?: { id: number; status: string; balance?: string; currency?: string } };
-export type AdminTransaction = { id: string; type?: string; sender?: string | { handle?: string }; recipient?: string | { handle?: string }; amount?: string; currency?: string; status?: string; created_at?: string };
+export type AdminTransaction = { id: string; type?: string; sender?: string | { handle?: string }; recipient?: string | { handle?: string }; sender_handle?: string; recipient_handle?: string; amount?: string; currency?: string; status?: string; created_at?: string };
 export type AdminList<T> = { results?: T[]; count?: number; next?: string | null };
 
 export type AdminRow = Record<string, unknown>;
@@ -54,6 +54,13 @@ export function getAdminResourceConfig(pathname: string): AdminResourceConfig {
 }
 export const getDashboard = () => adminRequest<DashboardStats>('/admin/dashboard');
 export const getUsers = (params: Record<string, string | number | undefined>) => adminRequest<AdminList<AdminUser>>('/admin/users', { params });
+export const getUserDetail = (id: number) => adminRequest<AdminUser & { balance?: string; wallet_status?: string; send_limit_per_tx?: string; send_limit_daily?: string; recent_transactions?: AdminTransaction[]; recent_transfer_attempts?: AdminRow[]; linked_providers?: AdminRow[]; push_devices?: AdminRow[]; trusted_devices?: AdminRow[]; parental_controls?: AdminRow[] }>(`/admin/users/${id}`);
+export const getPushDevices = (query = '') => adminRequest<{ devices: AdminRow[] }>('/admin/devices/push', { params: { query } });
+export const togglePushDevice = (id: number) => adminRequest(`/admin/devices/push/${id}/toggle`, { method: 'POST', data: {} });
+export const getTrustedDevices = (query = '') => adminRequest<{ devices: AdminRow[] }>('/admin/devices/trusted', { params: { query } });
+export const revokeTrustedDevice = (id: number) => adminRequest(`/admin/devices/trusted/${id}/revoke`, { method: 'POST', data: {} });
+export const getParentalControls = (params: Record<string, string>) => adminRequest<{ controls: AdminRow[] }>('/admin/parental-controls', { params });
+export const updateParentalControl = (id: number, data: AdminRow) => adminRequest(`/admin/parental-controls/${id}`, { method: 'PATCH', data });
 export const getTransactions = (params: Record<string, string | number | undefined>) => adminRequest<AdminList<AdminTransaction>>('/admin/transactions', { params });
 export const getCrudWallets = () => adminRequest<{ id: number; user: number; currency: string; status: string; balance: string }[]>('/admin/crud/wallets');
 export const getKycSubmissions = (status = 'pending') => adminRequest<{ submissions: Record<string, unknown>[] }>('/admin/kyc/user-submissions', { params: { status } });

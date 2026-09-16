@@ -1,1 +1,16 @@
-export { TransactionsPage as default } from './modules';
+import { ReloadOutlined, StopOutlined } from '@ant-design/icons';
+import { PageContainer } from '@ant-design/pro-components';
+import { useQuery } from '@tanstack/react-query';
+import { App, Button, Card, Input, Modal, Select, Space, Table, Tag } from 'antd';
+import React, { useState } from 'react';
+import { adminRequest, getTransactions, type AdminRow } from '@/services/admin';
+
+const colors: Record<string, string> = { completed: 'success', pending: 'warning', failed: 'error', reversed: 'default' };
+const display = (value: unknown) => typeof value === 'object' && value !== null ? String((value as { handle?: string }).handle || '-') : String(value || '-');
+const TransactionsPage: React.FC = () => {
+  const { message } = App.useApp(); const [query, setQuery] = useState(''); const [status, setStatus] = useState('');
+  const data = useQuery({ queryKey: ['admin-transactions-page', query, status], queryFn: () => getTransactions({ query, status, page_size: 100 }) }); const rows = (data.data?.results || []) as (AdminRow & { sender_handle?: string; recipient_handle?: string })[];
+  const reverse = async (id: string) => { try { await adminRequest(`/admin/transactions/${id}/reverse`, { method: 'POST', data: {} }); message.success('Reversal queued'); data.refetch(); } catch { message.error('Reversal failed'); } };
+  return <PageContainer className="admin-page" title="Transactions" subTitle="Inspect ledger movement, statuses, and reversals."><Card className="resource-toolbar"><Space wrap><Input.Search allowClear value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Reference or handle" style={{ width: 300 }} /><Select allowClear value={status || undefined} onChange={(value) => setStatus(value || '')} placeholder="Transaction status" options={['pending', 'completed', 'failed', 'reversed'].map((value) => ({ value, label: value }))} /><Button icon={<ReloadOutlined />} onClick={() => data.refetch()}>Refresh</Button></Space></Card><Card><Table rowKey="id" loading={data.isLoading} dataSource={rows} scroll={{ x: 1000 }} columns={[{ title: 'Reference', dataIndex: 'id' }, { title: 'Type', dataIndex: 'type' }, { title: 'Sender', render: (_, record) => record.sender_handle || display(record.sender) }, { title: 'Recipient', render: (_, record) => record.recipient_handle || display(record.recipient) }, { title: 'Amount', render: (_, record) => `${record.amount || '-'} ${record.currency || ''}` }, { title: 'Status', dataIndex: 'status', render: (value) => <Tag color={colors[value] || 'default'}>{value}</Tag> }, { title: 'Created', dataIndex: 'created_at' }, { title: 'Action', render: (_, record) => record.status === 'completed' && <Button danger type="link" icon={<StopOutlined />} onClick={() => Modal.confirm({ title: 'Reverse transaction?', onOk: () => reverse(String(record.id)) })}>Reverse</Button> }]} pagination={{ pageSize: 15, showSizeChanger: true }} /></Card></PageContainer>;
+};
+export default TransactionsPage;

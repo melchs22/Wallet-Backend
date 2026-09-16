@@ -16,7 +16,8 @@ from wallet.models import (
     User, Wallet, WalletStatus, SupportTicket, SupportTicketMessage,
     SupportTicketStatus, SupportTicketPriority, SupportTicketCategory,
     UserKYCSubmission, KYCTier, MobileMoneyTransaction, WebhookDelivery,
-    Settlement, TransferFeeRule, FeeWaiver, ExchangeRate, AuditLog, Transaction
+    Settlement, TransferFeeRule, FeeWaiver, ExchangeRate, AuditLog, Transaction,
+    PushDevice, TrustedDevice, ParentalControl
 )
 from wallet.admin_serializers import (
     SupportTicketSerializer, SupportTicketCreateSerializer,
@@ -32,6 +33,97 @@ from wallet.services.limits import apply_usage_based_limits
 from wallet.tasks import deliver_webhook_task, process_mobile_money_webhook, refresh_exchange_rates_task
 
 logger = logging.getLogger(__name__)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_push_devices_list(request):
+    """List customer push registrations for notification and device operations."""
+    devices = PushDevice.objects.select_related('user').order_by('-last_seen_at')
+    query = request.query_params.get('query', '').strip()
+    if query:
+        devices = devices.filter(Q(user__handle__icontains=query) | Q(user__email__icontains=query) | Q(device_id__icontains=query))
+    return Response({'devices': [{
+        'id': device.id, 'user_id': device.user_id, 'user_handle': device.user.handle,
+        'user_email': device.user.email, 'token': device.token[-12:], 'device_id': device.device_id,
+        'device_name': device.device_name, 'platform': device.platform, 'active': device.active,
+        'last_seen_at': device.last_seen_at, 'created_at': device.created_at,
+    } for device in devices[:200]]})
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_push_device_toggle(request, device_id):
+    device = PushDevice.objects.filter(id=device_id).first()
+    if not device:
+        return Response({'error': 'Push device not found'}, status=status.HTTP_404_NOT_FOUND)
+    device.active = not device.active
+    device.save(update_fields=['active'])
+    AuditLog.objects.create(user=request.user, action='admin_toggle_push_device', metadata={'device_id': device.id, 'active': device.active})
+    return Response({'id': device.id, 'active': device.active})
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_trusted_devices_list(request):
+    devices = TrustedDevice.objects.select_related('user').order_by('-last_seen_at')
+    query = request.query_params.get('query', '').strip()
+    if query:
+        devices = devices.filter(Q(user__handle__icontains=query) | Q(user__email__icontains=query) | Q(device_id__icontains=query))
+    return Response({'devices': [{
+        'id': device.id, 'user_id': device.user_id, 'user_handle': device.user.handle,
+        'user_email': device.user.email, 'device_id': device.device_id, 'device_name': device.device_name,
+        'platform': device.platform, 'is_trusted': device.is_trusted, 'revoked_at': device.revoked_at,
+        'first_seen_at': device.first_seen_at, 'last_seen_at': device.last_seen_at,
+    } for device in devices[:200]]})
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_trusted_device_revoke(request, device_id):
+    device = TrustedDevice.objects.filter(id=device_id).first()
+    if not device:
+        return Response({'error': 'Trusted device not found'}, status=status.HTTP_404_NOT_FOUND)
+    device.is_trusted = False
+    device.revoked_at = timezone.now()
+    device.save(update_fields=['is_trusted', 'revoked_at'])
+    PushDevice.objects.filter(user=device.user, device_id=device.device_id, active=True).update(active=False)
+    AuditLog.objects.create(user=request.user, action='admin_revoke_trusted_device', metadata={'device_id': device.id, 'user_id': device.user_id})
+    return Response({'id': device.id, 'is_trusted': False})
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_parental_controls_list(request):
+    controls = ParentalControl.objects.select_related('parent', 'child').order_by('-created_at')
+    query = request.query_params.get('query', '').strip()
+    status_filter = request.query_params.get('status', '').strip()
+    if query:
+        controls = controls.filter(Q(parent__handle__icontains=query) | Q(child__handle__icontains=query) | Q(parent__email__icontains=query) | Q(child__email__icontains=query))
+    if status_filter:
+        controls = controls.filter(status=status_filter)
+    return Response({'controls': [{
+        'id': control.id, 'parent_id': control.parent_id, 'parent_handle': control.parent.handle,
+        'child_id': control.child_id, 'child_handle': control.child.handle, 'status': control.status,
+        'can_view_transactions': control.can_view_transactions, 'can_control_balance': control.can_control_balance,
+        'can_send_money': control.can_send_money, 'can_set_limits': control.can_set_limits,
+        'linked_at': control.linked_at, 'created_at': control.created_at,
+    } for control in controls[:200]]})
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAdminUser])
+def admin_parental_control_update(request, control_id):
+    control = ParentalControl.objects.filter(id=control_id).first()
+    if not control:
+        return Response({'error': 'Parental control not found'}, status=status.HTTP_404_NOT_FOUND)
+    allowed = {'status', 'can_view_transactions', 'can_control_balance', 'can_send_money', 'can_set_limits'}
+    changes = {key: value for key, value in request.data.items() if key in allowed}
+    for key, value in changes.items():
+        setattr(control, key, value)
+    control.save(update_fields=list(changes.keys()))
+    AuditLog.objects.create(user=request.user, action='admin_update_parental_control', metadata={'control_id': control.id, 'fields': list(changes)})
+    return Response({'id': control.id, **changes})
 
 
 # ============================================================================

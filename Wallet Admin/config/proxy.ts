@@ -15,6 +15,10 @@ export default {
       target: 'http://178.128.156.225',
       changeOrigin: true,
     },
+    '/media/': {
+      target: 'http://178.128.156.225',
+      changeOrigin: true,
+    },
   },
   /**
    * @name 详细的代理配置
