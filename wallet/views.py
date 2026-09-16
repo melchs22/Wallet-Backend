@@ -663,12 +663,14 @@ class AdminLoginView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        username = serializer.validated_data['username']
+        username = serializer.validated_data['username'].strip()
         password = serializer.validated_data['password']
 
-        user = User.objects.filter(
-            Q(username__iexact=username) | Q(email__iexact=username)
-        ).first()
+        user = authenticate(request, username=username, password=password)
+        if user is None:
+            user = User.objects.filter(
+                Q(username__iexact=username) | Q(email__iexact=username)
+            ).first()
 
         if not user:
             return Response(
@@ -682,7 +684,7 @@ class AdminLoginView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        if not user.check_password(password):
+        if user is None or not user.check_password(password):
             return Response(
                 {'error': 'Invalid credentials'},
                 status=status.HTTP_401_UNAUTHORIZED
@@ -731,12 +733,14 @@ def admin_auth_login(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    username = serializer.validated_data['username']
+    username = serializer.validated_data['username'].strip()
     password = serializer.validated_data['password']
 
-    user = User.objects.filter(
-        Q(username__iexact=username) | Q(email__iexact=username)
-    ).first()
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        user = User.objects.filter(
+            Q(username__iexact=username) | Q(email__iexact=username)
+        ).first()
 
     if not user:
         return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
@@ -744,7 +748,7 @@ def admin_auth_login(request):
     if not user.is_staff:
         return Response({'error': 'Access denied. Admin privileges required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    if not user.check_password(password):
+    if user is None or not user.check_password(password):
         return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
 
     if user.status != UserStatus.ACTIVE:

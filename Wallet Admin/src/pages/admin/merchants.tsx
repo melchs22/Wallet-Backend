@@ -1,0 +1,1 @@
+export { MerchantsPage as default } from './modules';

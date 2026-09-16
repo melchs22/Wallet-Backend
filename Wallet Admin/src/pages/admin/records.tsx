@@ -1,0 +1,1 @@
+export { AdminRecordsPage as default } from './modules';

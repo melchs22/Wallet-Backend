@@ -1,0 +1,1 @@
+export { TransactionsPage as default } from './modules';

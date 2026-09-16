@@ -1,0 +1,19 @@
+.admin-page { --ink: #182230; --muted: #687386; }
+.admin-page .ant-page-header { padding-inline: 0; }
+.admin-hero { display: flex; justify-content: space-between; align-items: center; padding: 28px 32px; margin-bottom: 20px; border-radius: 10px; color: #f7fbff; background: linear-gradient(115deg, #173b4c 0%, #1e5b61 58%, #d48b5f 150%); overflow: hidden; }
+.admin-hero h1 { margin: 4px 0; color: #fff; font-size: clamp(24px, 3vw, 38px); }
+.admin-hero p { max-width: 580px; margin: 0; color: #cfe5e2; }
+.eyebrow { color: #a8d8d0; letter-spacing: 0.16em; font-size: 11px; font-weight: 700; }
+.hero-mark { display: grid; place-items: center; width: 96px; height: 96px; border: 1px solid rgba(255,255,255,.25); border-radius: 50%; color: #bce5c8; font-size: 42px; transform: rotate(-12deg); }
+.admin-tabs { margin-bottom: 16px; }
+.admin-tabs .ant-tabs-nav { margin-bottom: 16px; }
+.metric-card { border: 0; box-shadow: 0 8px 24px rgba(24,34,48,.06); }
+.metric-icon { float: right; background: #edf5f3; color: #26756c; }
+.metric-card .ant-statistic-title { color: var(--muted); }
+.metric-card .ant-statistic-content { color: var(--ink); font-size: 26px; }
+.overview-grid { margin-top: 16px; }
+.quick-actions { width: 100%; }
+.health-list { margin-top: 24px; padding-top: 18px; border-top: 1px solid #edf0f2; }
+.drawer-action { margin-top: 24px; }
+.resource-toolbar { margin-bottom: 16px; }
+@media (max-width: 700px) { .admin-hero { padding: 22px; } .hero-mark { width: 64px; height: 64px; font-size: 28px; } .admin-hero p { font-size: 13px; } }

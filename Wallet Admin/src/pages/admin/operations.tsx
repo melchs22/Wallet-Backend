@@ -1,0 +1,1 @@
+export { OperationsPage as default } from './modules';
