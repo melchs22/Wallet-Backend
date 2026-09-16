@@ -62,6 +62,8 @@ CSRF_TRUSTED_ORIGINS = getenv_list(
         'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
+        'http://localhost:8000',
+        'http://127.0.0.1:8000',
     ],
 )
 
@@ -234,14 +236,16 @@ SPECTACULAR_SETTINGS = {
 
 
 # CORS configuration
-CORS_ALLOWED_ORIGINS = getenv_list(
-    'CORS_ALLOWED_ORIGINS',
-    [
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys(
+    getenv_list('CORS_ALLOWED_ORIGINS', [])
+    + [
         'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
-    ],
-)
+        'http://localhost:8000',
+        'http://127.0.0.1:8000',
+    ]
+))
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r'https://.*\.vercel\.app$',
 ]
@@ -266,14 +270,16 @@ SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', False)
 CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
 CSRF_COOKIE_HTTPONLY = True
-CSRF_TRUSTED_ORIGINS = getenv_list(
-    'CSRF_TRUSTED_ORIGINS',
-    [
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(
+    getenv_list('CSRF_TRUSTED_ORIGINS', [])
+    + [
         'http://178.128.156.225:3000',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
-    ],
-)
+        'http://localhost:8000',
+        'http://127.0.0.1:8000',
+    ]
+))
 
 CSRF_EXEMPT_URLS = [
     r'^/api/',
