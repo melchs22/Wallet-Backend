@@ -704,7 +704,17 @@ class AdminLoginView(APIView):
             metadata={'method': 'username_password'}
         )
 
-        wallet = user.wallet
+        wallet, created = Wallet.objects.get_or_create(
+            user=user,
+            defaults={'currency': 'GNF', 'status': WalletStatus.ACTIVE},
+        )
+        if created:
+            LedgerEntry.objects.create(
+                wallet=wallet,
+                transaction=None,
+                direction=LedgerDirection.CREDIT,
+                amount=Decimal('0.00'),
+            )
 
         response_data = {
             'user': UserSerializer(user).data,
