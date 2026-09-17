@@ -16,6 +16,7 @@ export default {
   'menu.admin.users': 'Utilisateurs',
   'menu.admin.wallets': 'Portefeuilles',
   'menu.admin.transactions': 'Transactions',
+  'menu.admin.reports': 'Rapports financiers',
   'menu.admin.push-devices': 'Appareils push',
   'menu.admin.trusted-devices': 'Appareils de confiance',
   'menu.admin.parental-controls': 'Controle parental',

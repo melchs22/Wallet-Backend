@@ -4,6 +4,7 @@ export default {
   'menu.admin.users': 'Users',
   'menu.admin.wallets': 'Wallets',
   'menu.admin.transactions': 'Transactions',
+  'menu.admin.reports': 'Financial Reports',
   'menu.admin.push-devices': 'Push devices',
   'menu.admin.trusted-devices': 'Trusted devices',
   'menu.admin.parental-controls': 'Parental controls',

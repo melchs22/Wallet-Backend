@@ -167,20 +167,6 @@ export default defineConfig({
    */
   reactQuery: {},
   /**
-   * @name 权限插件
-   * @description 基于 initialState 的权限插件，必须先打开 initialState
-   * @doc https://umijs.org/docs/max/access
-   */
-  access: {},
-  /**
-   * @name Google Analytics
-   * @description 使用 GA4 (gtag.js) 进行站点分析
-   * @doc https://umijs.org/docs/max/analytics
-   */
-  analytics: {
-    ga_v2: 'G-59NF1VHHPF',
-  },
-  /**
    * @name <head> 中额外的 script
    * @description 配置 <head> 中额外的 script
    */
