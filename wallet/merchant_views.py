@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from django.conf import settings
 from rest_framework import exceptions, status
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from django.http import StreamingHttpResponse
@@ -11,6 +12,7 @@ from django.utils import timezone
 from rest_framework.response import Response
 
 from wallet.merchant_authentication import MerchantApiKeyAuthentication, MerchantApiKeyRateThrottle
+from wallet.authentication import SignedTokenAuthentication
 from wallet.merchant_serializers import (
     CheckoutConfirmSerializer,
     FeePreviewQuerySerializer,
@@ -222,6 +224,51 @@ def _merchant_transactions(merchant, mode):
         payment_intents__merchant=merchant,
         payment_intents__mode=mode,
     ).distinct().select_related('sender', 'recipient').prefetch_related('payment_intents')
+
+
+def _session_merchant_mode(request):
+    mode = request.query_params.get('mode', 'sandbox').lower()
+    if mode not in ('sandbox', 'live'):
+        raise ValueError('Invalid merchant environment')
+    if mode == 'live' and request.user.merchant_account.status != 'active':
+        raise PermissionError('Live mode is available after merchant approval.')
+    return mode
+
+
+@api_view(['GET'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_transactions(request):
+    """Dashboard-only transaction access using the merchant user session."""
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        mode = _session_merchant_mode(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    queryset = _merchant_transactions(merchant, mode).order_by('-created_at')
+    limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
+    return Response(MerchantTransactionSerializer(queryset[:limit], many=True).data)
+
+
+@api_view(['GET'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_transaction_detail(request, transaction_id):
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        mode = _session_merchant_mode(request)
+        transaction_obj = _merchant_transactions(merchant, mode).get(pk=transaction_id)
+    except (ValueError, PermissionError) as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    except (Transaction.DoesNotExist, ValueError):
+        return Response({'error': 'Transaction not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(MerchantTransactionSerializer(transaction_obj).data)
 
 
 @api_view(['GET'])

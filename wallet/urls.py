@@ -31,6 +31,7 @@ from .parental_views import (
 )
 from . import admin_views
 from . import admin_api
+from . import merchant_views
 
 
 urlpatterns = [
@@ -215,6 +216,8 @@ urlpatterns = [
     path('merchants/me/subscription', merchant_subscription, name='merchant_subscription'),
     path('merchants/me/qr', generate_merchant_qr, name='generate_merchant_qr'),
     path('merchants/me/dashboard', merchant_dashboard, name='merchant_dashboard'),
+    path('merchants/me/transactions', merchant_views.merchant_session_transactions, name='merchant_session_transactions'),
+    path('merchants/me/transactions/<str:transaction_id>', merchant_views.merchant_session_transaction_detail, name='merchant_session_transaction_detail'),
     path('merchants/me/payout-schedule', merchant_payout_schedule, name='merchant_payout_schedule'),
     path('merchants/me/logs', merchant_logs, name='merchant_logs'),
     path('merchants/me/payment-links', merchant_payment_links, name='merchant_payment_links'),
