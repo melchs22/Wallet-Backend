@@ -11,7 +11,22 @@ from .models import (
     PushDevice, MerchantApiKey, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule,
     TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
     SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission, AppUpdatePolicy,
+    MerchantLimit, MerchantTeamMember,
 )
+
+
+@admin.register(MerchantLimit)
+class MerchantLimitAdmin(admin.ModelAdmin):
+    list_display = ['merchant', 'currency', 'per_transaction', 'daily', 'monthly', 'is_active']
+    list_filter = ['currency', 'is_active']
+    search_fields = ['merchant__business_name', 'merchant__business_email']
+
+
+@admin.register(MerchantTeamMember)
+class MerchantTeamMemberAdmin(admin.ModelAdmin):
+    list_display = ['merchant', 'email', 'role', 'is_active', 'invited_at']
+    list_filter = ['role', 'is_active']
+    search_fields = ['merchant__business_name', 'email', 'user__email']
 
 
 @admin.register(SupportedCountry)

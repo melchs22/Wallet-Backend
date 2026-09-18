@@ -4,9 +4,17 @@ from zoneinfo import ZoneInfo
 from django.db.models import Count, Sum
 from django.utils import timezone
 
-from wallet.models import KYCTier, SystemSetting, TransactionStatus, TransactionStatus as TxStatus
+from wallet.models import (
+    KYCTier, MerchantLimit, PaymentIntentStatus, SystemSetting,
+    TransactionStatus, TransactionStatus as TxStatus,
+)
 
 BUSINESS_TIMEZONE = ZoneInfo('Africa/Conakry')
+MERCHANT_LIMIT_STATUSES = [
+    PaymentIntentStatus.CREATED,
+    PaymentIntentStatus.PENDING_PAYMENT,
+    PaymentIntentStatus.SUCCEEDED,
+]
 
 
 DEFAULTS = {
@@ -145,7 +153,6 @@ def apply_usage_based_limits(user):
     snapshot = compute_limit_snapshot(user)
     if snapshot['manually_set']:
         return snapshot
-
     fields = []
     if user.send_limit_per_tx != snapshot['send_limit_per_tx']:
         user.send_limit_per_tx = snapshot['send_limit_per_tx']
@@ -155,4 +162,47 @@ def apply_usage_based_limits(user):
         fields.append('send_limit_daily')
     if fields:
         user.save(update_fields=fields)
+    return snapshot
+
+
+def get_merchant_limit(merchant, currency):
+    currency = currency.upper()
+    limit, _ = MerchantLimit.objects.get_or_create(merchant=merchant, currency=currency)
+    return limit
+
+
+def merchant_limit_snapshot(merchant, currency, now=None):
+    """Return merchant limits and period usage for the requested currency."""
+    now = now or timezone.now()
+    limit = get_merchant_limit(merchant, currency)
+    local_now = now.astimezone(BUSINESS_TIMEZONE)
+    start_day = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_month = start_day.replace(day=1)
+    intents = merchant.payment_intents.filter(
+        currency=limit.currency, status__in=MERCHANT_LIMIT_STATUSES,
+    )
+    daily_used = intents.filter(created_at__gte=start_day).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    monthly_used = intents.filter(created_at__gte=start_month).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    return {
+        'currency': limit.currency,
+        'per_transaction': limit.per_transaction,
+        'per_transaction_used': Decimal('0.00'),
+        'per_transaction_remaining': limit.per_transaction,
+        'daily': limit.daily,
+        'monthly': limit.monthly,
+        'daily_used': daily_used,
+        'daily_remaining': max(limit.daily - daily_used, Decimal('0.00')),
+        'monthly_used': monthly_used,
+        'monthly_remaining': max(limit.monthly - monthly_used, Decimal('0.00')),
+    }
+
+
+def enforce_merchant_limit(merchant, amount, currency):
+    snapshot = merchant_limit_snapshot(merchant, currency)
+    if amount > snapshot['per_transaction']:
+        raise ValueError('per_transaction_limit_exceeded')
+    if snapshot['daily_used'] + amount > snapshot['daily']:
+        raise ValueError('daily_limit_exceeded')
+    if snapshot['monthly_used'] + amount > snapshot['monthly']:
+        raise ValueError('monthly_limit_exceeded')
     return snapshot

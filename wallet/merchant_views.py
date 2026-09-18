@@ -23,9 +23,11 @@ from wallet.merchant_serializers import (
     MerchantTransactionSerializer,
 )
 from wallet.models import (
-    Dispute, DisputeStatus, Merchant, PaymentIntent, PaymentIntentStatus,
+    Dispute, DisputeStatus, Merchant, MerchantTeamMember, MerchantTeamRole,
+    PaymentIntent, PaymentIntentStatus,
     Settlement, Transaction, WebhookDelivery, WebhookDeliveryStatus,
 )
+from wallet.services.limits import merchant_limit_snapshot
 from wallet.services.fees import preview_merchant_transfer_fee, resolve_fee
 from wallet.services.payment_intents import (
     PaymentIntentError,
@@ -49,6 +51,99 @@ def _merchant_from_request(request):
     if not getattr(request, 'merchant_api_mode', None):
         raise exceptions.AuthenticationFailed('Merchant API authentication is required.')
     return merchant
+
+
+def _team_context(request):
+    if not request.user.is_authenticated:
+        raise exceptions.NotAuthenticated()
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant and request.user == merchant.user:
+        return merchant, MerchantTeamRole.OWNER
+    member = MerchantTeamMember.objects.filter(
+        user=request.user, is_active=True,
+    ).select_related('merchant').first()
+    if not member:
+        raise exceptions.PermissionDenied('You are not a member of this merchant team.')
+    return member.merchant, member.role
+
+
+def _team_can(role, action):
+    return role == MerchantTeamRole.OWNER or (
+        role == MerchantTeamRole.ADMIN and action in {'invite', 'update', 'remove', 'list'}
+    ) or (role in {MerchantTeamRole.FINANCE, MerchantTeamRole.SUPPORT, MerchantTeamRole.DEVELOPER} and action == 'list')
+
+
+@api_view(['GET'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_limits(request):
+    merchant = _merchant_from_request(request)
+    currency = (request.query_params.get('currency') or 'GNF').upper()
+    snapshot = merchant_limit_snapshot(merchant, currency)
+    return Response({key: str(value) if hasattr(value, 'quantize') else value for key, value in snapshot.items()})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def merchant_team(request):
+    merchant, role = _team_context(request)
+    if request.method == 'GET':
+        if not _team_can(role, 'list'):
+            raise exceptions.PermissionDenied()
+        members = MerchantTeamMember.objects.filter(merchant=merchant).select_related('user', 'invited_by')
+        result = [{
+            'id': None, 'email': merchant.user.email, 'user_id': merchant.user_id,
+            'role': MerchantTeamRole.OWNER, 'is_active': True,
+            'invited_at': merchant.created_at, 'accepted_at': merchant.created_at,
+        }]
+        result.extend({
+            'id': member.id, 'email': member.email, 'user_id': member.user_id,
+            'role': member.role, 'is_active': member.is_active,
+            'invited_at': member.invited_at, 'accepted_at': member.accepted_at,
+        } for member in members)
+        return Response(result)
+    if not _team_can(role, 'invite'):
+        raise exceptions.PermissionDenied()
+    email = (request.data.get('email') or '').strip().lower()
+    member_role = request.data.get('role', MerchantTeamRole.SUPPORT)
+    if not email or '@' not in email:
+        return Response({'error': 'A valid email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if member_role == MerchantTeamRole.OWNER or member_role not in MerchantTeamRole.values:
+        return Response({'error': 'Invalid team role.'}, status=status.HTTP_400_BAD_REQUEST)
+    user = __import__('wallet.models', fromlist=['User']).User.objects.filter(email__iexact=email).first()
+    member, created = MerchantTeamMember.objects.update_or_create(
+        merchant=merchant, email=email,
+        defaults={'user': user, 'role': member_role, 'is_active': True, 'invited_by': request.user},
+    )
+    return Response({'id': member.id, 'email': member.email, 'user_id': member.user_id, 'role': member.role,
+                     'is_active': member.is_active}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def merchant_team_member(request, member_id):
+    merchant, role = _team_context(request)
+    try:
+        member = MerchantTeamMember.objects.get(id=member_id, merchant=merchant)
+    except MerchantTeamMember.DoesNotExist:
+        return Response({'error': 'Team member not found.'}, status=status.HTTP_404_NOT_FOUND)
+    action = 'remove' if request.method == 'DELETE' else 'update'
+    if not _team_can(role, action):
+        raise exceptions.PermissionDenied()
+    if request.method == 'DELETE':
+        if member.role == MerchantTeamRole.OWNER:
+            return Response({'error': 'The owner cannot be removed.'}, status=status.HTTP_400_BAD_REQUEST)
+        member.is_active = False
+        member.save(update_fields=['is_active'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    new_role = request.data.get('role')
+    if new_role not in MerchantTeamRole.values or new_role == MerchantTeamRole.OWNER:
+        return Response({'error': 'Invalid team role.'}, status=status.HTTP_400_BAD_REQUEST)
+    member.role = new_role
+    member.save(update_fields=['role'])
+    return Response({'id': member.id, 'email': member.email, 'user_id': member.user_id,
+                     'role': member.role, 'is_active': member.is_active})
 
 
 @api_view(['POST'])
@@ -269,6 +364,22 @@ def merchant_session_transaction_detail(request, transaction_id):
     except (Transaction.DoesNotExist, ValueError):
         return Response({'error': 'Transaction not found'}, status=status.HTTP_404_NOT_FOUND)
     return Response(MerchantTransactionSerializer(transaction_obj).data)
+
+
+@api_view(['GET'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_limits(request):
+    """Dashboard-only limits using the merchant user session."""
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    currency = (request.query_params.get('currency') or merchant.wallet.currency or 'GNF').upper()
+    snapshot = merchant_limit_snapshot(merchant, currency)
+    return Response({
+        key: str(value) if hasattr(value, 'quantize') else value
+        for key, value in snapshot.items()
+    })
 
 
 @api_view(['GET'])

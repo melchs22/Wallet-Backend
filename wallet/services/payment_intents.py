@@ -30,6 +30,7 @@ from wallet.services.fees import get_platform_wallet, resolve_fee
 from wallet.services.merchants import get_merchant_wallet
 from wallet.services.notifications import create_notification_record
 from wallet.services.webhooks import enqueue_payment_intent_webhook
+from wallet.services.limits import enforce_merchant_limit
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ def create_payment_intent(
     return_url='',
     idempotency_key='',
 ):
+    currency = currency.upper()
     if merchant.status != MerchantStatus.ACTIVE and mode != MerchantMode.SANDBOX:
         raise PaymentIntentError('merchant_not_active', 'Merchant account is not active')
 
@@ -67,6 +69,17 @@ def create_payment_intent(
         used = merchant.payment_intents.filter(created_at__gte=subscription.current_period_start).count()
         if used >= subscription.plan.monthly_transaction_limit:
             raise PaymentIntentError('plan_limit_reached', 'Your monthly payment-intent limit has been reached')
+
+    try:
+        enforce_merchant_limit(merchant, amount, currency)
+    except ValueError as exc:
+        code = str(exc)
+        messages = {
+            'per_transaction_limit_exceeded': 'Merchant per-transaction limit exceeded',
+            'daily_limit_exceeded': 'Merchant daily limit exceeded',
+            'monthly_limit_exceeded': 'Merchant monthly limit exceeded',
+        }
+        raise PaymentIntentError(code, messages.get(code, 'Merchant transaction limit exceeded'))
 
     if idempotency_key:
         existing = PaymentIntent.objects.filter(

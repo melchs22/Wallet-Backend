@@ -1089,6 +1089,53 @@ class Merchant(models.Model):
         ]
 
 
+class MerchantLimit(models.Model):
+    """Transaction volume limits for a merchant, independent of user send limits."""
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='transaction_limits')
+    currency = models.CharField(max_length=3, default='GNF')
+    per_transaction = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('100000.00'))
+    daily = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('1000000.00'))
+    monthly = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('10000000.00'))
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'merchant_limits'
+        constraints = [
+            models.UniqueConstraint(fields=['merchant', 'currency'], name='unique_merchant_limit_currency'),
+        ]
+
+
+class MerchantTeamRole(models.TextChoices):
+    OWNER = 'owner', 'Owner'
+    ADMIN = 'admin', 'Admin'
+    FINANCE = 'finance', 'Finance'
+    SUPPORT = 'support', 'Support'
+    DEVELOPER = 'developer', 'Developer'
+
+
+class MerchantTeamMember(models.Model):
+    """A merchant's team membership and pending invitations."""
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='team_members')
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='merchant_team_memberships')
+    email = models.EmailField()
+    role = models.CharField(max_length=20, choices=MerchantTeamRole.choices, default=MerchantTeamRole.SUPPORT)
+    is_active = models.BooleanField(default=True)
+    invited_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='sent_merchant_invitations')
+    invited_at = models.DateTimeField(auto_now_add=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'merchant_team_members'
+        constraints = [
+            models.UniqueConstraint(fields=['merchant', 'email'], name='unique_merchant_team_email'),
+        ]
+        indexes = [models.Index(fields=['merchant', 'is_active', 'role'])]
+
+    def __str__(self):
+        return f'{self.email} ({self.role})'
+
+
 class FeePolicy(models.Model):
     name = models.CharField(max_length=100)
     applies_to = models.CharField(max_length=30, choices=FeeAppliesTo.choices)

@@ -60,6 +60,8 @@ urlpatterns = [
     path('auth/devices', trusted_devices, name='trusted_devices'),
     path('auth/devices/<str:device_id>/revoke', revoke_trusted_device, name='revoke_trusted_device'),
     path('me', MeView.as_view(), name='me'),
+    path('merchant/team', merchant_views.merchant_team, name='merchant_team'),
+    path('merchant/team/<int:member_id>', merchant_views.merchant_team_member, name='merchant_team_member'),
     
     # User resolution
     path('users/resolve', UserResolveView.as_view(), name='user_resolve'),
@@ -218,6 +220,7 @@ urlpatterns = [
     path('merchants/me/dashboard', merchant_dashboard, name='merchant_dashboard'),
     path('merchants/me/transactions', merchant_views.merchant_session_transactions, name='merchant_session_transactions'),
     path('merchants/me/transactions/<str:transaction_id>', merchant_views.merchant_session_transaction_detail, name='merchant_session_transaction_detail'),
+    path('merchants/me/limits', merchant_views.merchant_session_limits, name='merchant_session_limits'),
     path('merchants/me/payout-schedule', merchant_payout_schedule, name='merchant_payout_schedule'),
     path('merchants/me/logs', merchant_logs, name='merchant_logs'),
     path('merchants/me/payment-links', merchant_payment_links, name='merchant_payment_links'),
