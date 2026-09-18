@@ -222,6 +222,7 @@ urlpatterns = [
     path('merchants/me/transactions/<str:transaction_id>', merchant_views.merchant_session_transaction_detail, name='merchant_session_transaction_detail'),
     path('merchants/me/limits', merchant_views.merchant_session_limits, name='merchant_session_limits'),
     path('merchants/me/settlements', merchant_views.merchant_session_settlements, name='merchant_session_settlements'),
+    path('merchants/me/disputes', merchant_views.merchant_session_disputes, name='merchant_session_disputes'),
     path('merchants/me/payout-schedule', merchant_payout_schedule, name='merchant_payout_schedule'),
     path('merchants/me/logs', merchant_logs, name='merchant_logs'),
     path('merchants/me/payment-links', merchant_payment_links, name='merchant_payment_links'),

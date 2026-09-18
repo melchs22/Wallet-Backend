@@ -397,6 +397,26 @@ def merchant_session_settlements(request):
 
 
 @api_view(['GET'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_disputes(request):
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        mode = _session_merchant_mode(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    disputes = _merchant_dispute_queryset(merchant, mode)
+    requested_status = request.query_params.get('status')
+    if requested_status and requested_status != 'all':
+        disputes = disputes.filter(status=requested_status)
+    return Response(MerchantDisputeSerializer(disputes[:100], many=True).data)
+
+
+@api_view(['GET'])
 @authentication_classes([MerchantApiKeyAuthentication])
 @permission_classes([AllowAny])
 @throttle_classes([MerchantApiKeyRateThrottle])
