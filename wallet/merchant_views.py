@@ -383,6 +383,20 @@ def merchant_session_limits(request):
 
 
 @api_view(['GET'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_settlements(request):
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    settlements = merchant.settlements.order_by('-created_at')
+    requested_status = request.query_params.get('status')
+    if requested_status and requested_status != 'all':
+        settlements = settlements.filter(status=requested_status)
+    return Response(MerchantSettlementSerializer(settlements[:100], many=True).data)
+
+
+@api_view(['GET'])
 @authentication_classes([MerchantApiKeyAuthentication])
 @permission_classes([AllowAny])
 @throttle_classes([MerchantApiKeyRateThrottle])
