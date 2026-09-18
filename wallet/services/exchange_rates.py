@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from wallet.models import ExchangeRate, Wallet
+from wallet.models import ExchangeRate, SupportedCountry, Wallet
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,18 @@ def get_active_currencies():
     wallet_currencies = set(
         Wallet.objects.values_list('currency', flat=True).distinct()
     )
+    country_currencies = set(
+        SupportedCountry.objects.filter(active=True)
+        .exclude(currency__isnull=True)
+        .exclude(currency='')
+        .values_list('currency', flat=True)
+    )
     extra = set(getattr(settings, 'EXCHANGE_RATE_EXTRA_CURRENCIES', ['GNF', 'EUR', 'GBP']))
-    currencies = {c.upper() for c in wallet_currencies if c} | extra
+    currencies = (
+        {c.upper() for c in wallet_currencies if c}
+        | {c.upper() for c in country_currencies if c}
+        | {c.upper() for c in extra if c}
+    )
     return sorted(currencies)
 
 
@@ -109,6 +119,8 @@ def refresh_exchange_rates(base_currencies=None, target_currencies=None):
     created_count = 0
     skipped_count = 0
     errors = []
+    missing_pairs = []
+    fetched_payloads = {}
 
     for base in bases:
         try:
@@ -118,23 +130,36 @@ def refresh_exchange_rates(base_currencies=None, target_currencies=None):
             errors.append({'base': base, 'error': str(exc)})
             continue
 
-        api_rates = payload['rates']
+        fetched_payloads[base] = payload
 
+    for base, payload in fetched_payloads.items():
         for target in targets:
             if target == base:
                 continue
-            if target not in api_rates:
+            raw_rate = payload['rates'].get(target)
+            if raw_rate is None:
+                reverse_rates = fetched_payloads.get(target, {}).get('rates', {})
+                reverse_rate = reverse_rates.get(base)
+                if reverse_rate is not None:
+                    try:
+                        raw_rate = Decimal('1') / Decimal(str(reverse_rate))
+                    except (InvalidOperation, ZeroDivisionError):
+                        raw_rate = None
+            if raw_rate is None:
                 skipped_count += 1
+                missing_pairs.append(f'{base}/{target}')
                 continue
 
             try:
-                rate = Decimal(str(api_rates[target]))
+                rate = Decimal(str(raw_rate))
             except (InvalidOperation, TypeError):
                 skipped_count += 1
+                missing_pairs.append(f'{base}/{target}')
                 continue
 
             if rate <= 0:
                 skipped_count += 1
+                missing_pairs.append(f'{base}/{target}')
                 continue
 
             _store_rate(base, target, rate, now)
@@ -145,8 +170,9 @@ def refresh_exchange_rates(base_currencies=None, target_currencies=None):
         'bases_fetched': len(bases) - len(errors),
         'created_count': created_count,
         'skipped_count': skipped_count,
+        'missing_pairs': missing_pairs,
         'errors': errors,
-        'status': 'partial_failure' if errors else 'ok',
+        'status': 'partial_failure' if errors or missing_pairs else 'ok',
     }
 
     logger.info(json.dumps({'event': 'refresh_exchange_rates', **result}))

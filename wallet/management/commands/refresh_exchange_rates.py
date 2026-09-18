@@ -23,10 +23,18 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f'Done. Created {result["created_count"]} rates, '
                 f'skipped {result["skipped_count"]}, '
-                f'errors {len(result["errors"])}.'
+                f'errors {len(result["errors"])}, '
+                f'missing pairs {len(result.get("missing_pairs", []))}.'
             )
         )
 
         if result['errors']:
             for err in result['errors']:
                 self.stdout.write(self.style.ERROR(str(err)))
+        if result.get('missing_pairs'):
+            self.stdout.write(
+                self.style.WARNING(
+                    'The rate provider did not return these pairs: '
+                    + ', '.join(result['missing_pairs'])
+                )
+            )

@@ -3,10 +3,11 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
 
-from wallet.models import ExchangeRate, Wallet
+from wallet.models import ExchangeRate, SupportedCountry, Wallet
 from wallet.services.exchange_rates import (
     fetch_latest_rates,
     get_active_exchange_rate,
+    get_active_currencies,
     refresh_exchange_rates,
 )
 
@@ -81,3 +82,42 @@ class ExchangeRateServiceTestCase(TestCase):
         refresh_exchange_rates(base_currencies=['EUR'], target_currencies=['USD', 'EUR', 'GBP'])
         self.assertTrue(ExchangeRate.objects.filter(from_currency='EUR', to_currency='USD').exists())
         mock_fetch.assert_called()
+
+    def test_active_country_currencies_are_included(self):
+        SupportedCountry.objects.create(
+            code='UG',
+            name='Uganda',
+            dial_code='+256',
+            currency='UGX',
+            active=True,
+        )
+        SupportedCountry.objects.create(
+            code='XX',
+            name='Inactive',
+            dial_code='+000',
+            currency='XXX',
+            active=False,
+        )
+
+        currencies = get_active_currencies()
+
+        self.assertIn('UGX', currencies)
+        self.assertNotIn('XXX', currencies)
+
+    @patch('wallet.services.exchange_rates.fetch_latest_rates')
+    def test_refresh_uses_reverse_pair_when_direct_rate_is_missing(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {'base': 'GNF', 'rates': {'GNF': 1}},
+            {'base': 'USD', 'rates': {'USD': 1, 'GNF': 10000}},
+        ]
+
+        result = refresh_exchange_rates(
+            base_currencies=['GNF', 'USD'],
+            target_currencies=['GNF', 'USD'],
+        )
+
+        self.assertEqual(result['created_count'], 2)
+        self.assertEqual(
+            ExchangeRate.objects.get(from_currency='GNF', to_currency='USD').rate,
+            Decimal('0.0001'),
+        )
