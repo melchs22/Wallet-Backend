@@ -11,7 +11,7 @@ def flag_for_code(code):
 
 
 class Command(BaseCommand):
-    help = 'Import global_countries.json into the supported-country catalog as inactive.'
+    help = 'Import country metadata and currencies from global_countries.json.'
 
     def add_arguments(self, parser):
         parser.add_argument('path', nargs='?', default='global_countries.json')
@@ -25,7 +25,7 @@ class Command(BaseCommand):
         except (OSError, json.JSONDecodeError) as exc:
             raise CommandError(f'Could not read country file: {exc}') from exc
 
-        created = updated = 0
+        created = updated = currencies_updated = 0
         for country in countries:
             code = str(country.get('cca2', '')).upper()
             if len(code) != 2:
@@ -34,16 +34,29 @@ class Command(BaseCommand):
             root = idd.get('root') or ''
             suffixes = idd.get('suffixes') or []
             dial_code = f'{root}{suffixes[0]}' if root and suffixes else root
+            currencies = country.get('currencies') or {}
+            currency = next((str(code).upper() for code in currencies if len(str(code)) == 3), 'GNF')
             defaults = {
                 'name': ((country.get('name') or {}).get('common') or code)[:100],
                 'dial_code': dial_code[:8],
                 'flag': flag_for_code(code),
-                'active': False,
+                'active': True,
+                'currency': currency,
             }
-            _, was_created = SupportedCountry.objects.update_or_create(code=code, defaults=defaults)
-            if was_created:
-                created += 1
-            else:
-                updated += 1
+            existing = SupportedCountry.objects.filter(code=code).first()
+            if existing:
+                changed = [field for field, value in defaults.items() if getattr(existing, field) != value]
+                for field in changed:
+                    setattr(existing, field, defaults[field])
+                if changed:
+                    existing.save(update_fields=changed)
+                    updated += 1
+                    currencies_updated += int('currency' in changed)
+                continue
+            SupportedCountry.objects.create(code=code, **defaults)
+            created += 1
 
-        self.stdout.write(self.style.SUCCESS(f'Imported {created + updated} countries ({created} created, {updated} updated).'))
+        self.stdout.write(self.style.SUCCESS(
+            f'Imported {created + updated} countries ({created} created, {updated} updated, '
+            f'{currencies_updated} currencies updated).'
+        ))

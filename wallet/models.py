@@ -133,6 +133,7 @@ class SupportedCountry(models.Model):
     code = models.CharField(max_length=2, unique=True)
     name = models.CharField(max_length=100)
     dial_code = models.CharField(max_length=8)
+    currency = models.CharField(max_length=3, default='GNF')
     flag = models.CharField(max_length=8, blank=True, default='')
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1525,4 +1526,3 @@ class AdminMessage(models.Model):
 
     def __str__(self):
         return f"Message to {self.recipient.handle}: {self.subject}"
-

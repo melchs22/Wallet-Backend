@@ -1,7 +1,7 @@
 from django.urls import path, include
 from .views import (
     EmailSignupView, EmailLoginView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView, resolve_user_by_phone,
-    TransferView, NotificationListView, NotificationDetailView, PushDeviceView, OtpChallengeRequestView, OtpChallengeVerifyView,
+    TransferView, TransferPreviewView, NotificationListView, NotificationDetailView, PushDeviceView, OtpChallengeRequestView, OtpChallengeVerifyView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView, AdminLoginView,
     admin_auth_login, admin_auth_logout, admin_change_password,
@@ -65,6 +65,7 @@ urlpatterns = [
     
     # Transfers (create transfer)
     path('transfers', TransferView.as_view(), name='transfer'),
+    path('transfers/preview', TransferPreviewView.as_view(), name='transfer_preview'),
     
     # Notifications
     path('notifications', NotificationListView.as_view(), name='notification_list'),

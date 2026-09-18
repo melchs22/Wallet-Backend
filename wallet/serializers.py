@@ -119,7 +119,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 class SupportedCountrySerializer(serializers.ModelSerializer):
     class Meta:
         model = SupportedCountry
-        fields = ['code', 'name', 'dial_code', 'flag']
+        fields = ['code', 'name', 'dial_code', 'currency', 'flag']
 
 
 class LegalDocumentSerializer(serializers.ModelSerializer):
@@ -161,6 +161,7 @@ class TransferRequestSerializer(serializers.Serializer):
     currency = serializers.CharField(required=True, max_length=3)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
     idempotency_key = serializers.CharField(required=True, max_length=255)
+    country_code = serializers.CharField(required=False, default='GN', max_length=2)
 
     def validate_amount(self, value):
         if value <= 0:
@@ -168,6 +169,17 @@ class TransferRequestSerializer(serializers.Serializer):
         # Check that amount has at most 2 decimal places for USD
         if value.as_tuple().exponent < -2:
             raise serializers.ValidationError("Amount cannot have more than 2 decimal places")
+        return value
+
+
+class TransferPreviewSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2)
+    currency = serializers.CharField(max_length=3)
+    country_code = serializers.CharField(max_length=2)
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('Amount must be greater than 0')
         return value
 
 

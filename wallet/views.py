@@ -33,7 +33,7 @@ from .models import (
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
     EmailSignupSerializer, EmailLoginSerializer,
-    UserResolveSerializer, TransferRequestSerializer, TransferResponseSerializer,
+    UserResolveSerializer, TransferRequestSerializer, TransferResponseSerializer, TransferPreviewSerializer,
     NotificationSerializer, PushDeviceSerializer, TransactionSerializer, WalletDetailSerializer,
     ProfileUpdateSerializer, generate_unique_handle, TransactionDetailSerializer,
     ReversalRequestSerializer, ReversalResponseSerializer, TransferAttemptSerializer,
@@ -1191,6 +1191,43 @@ class OtpChallengeVerifyView(APIView):
 def step_up_required(request, purpose):
     token = request.auth if isinstance(request.auth, str) else ''
     return not token_is_step_up_verified(token, request.user, request)
+
+
+class TransferPreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = TransferPreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        amount = serializer.validated_data['amount']
+        currency = serializer.validated_data['currency'].upper()
+        country_code = serializer.validated_data['country_code'].upper()
+        country = SupportedCountry.objects.filter(code=country_code, active=True).first()
+        if not country:
+            return Response({'code': 'unsupported_country', 'message': 'Transfer destination is unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.user.wallet.currency != currency:
+            return Response({'code': 'currency_mismatch', 'message': f'Sender wallet currency is {request.user.wallet.currency}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        receiver_currency = country.currency.upper()
+        fee = (amount * Decimal('0.04')).quantize(Decimal('0.01')) if country.code != 'GN' else Decimal('0.00')
+        rate = Decimal('1')
+        if receiver_currency != currency:
+            from wallet.services.exchange_rates import get_active_exchange_rate
+            exchange_rate = get_active_exchange_rate(currency, receiver_currency)
+            if not exchange_rate:
+                return Response({'code': 'no_exchange_rate', 'message': f'No exchange rate available for {currency} to {receiver_currency}.'}, status=status.HTTP_400_BAD_REQUEST)
+            rate = exchange_rate.rate
+        return Response({
+            'send_amount': str(amount),
+            'fee_amount': str(fee),
+            'total_debit': str(amount + fee),
+            'receive_amount': str((amount * rate).quantize(Decimal('0.01'))),
+            'send_currency': currency,
+            'receive_currency': receiver_currency,
+            'exchange_rate': str(rate),
+            'country_code': country.code,
+            'transfer_type': 'internal' if country.code == 'GN' else 'international',
+        })
 
 
 @extend_schema(
