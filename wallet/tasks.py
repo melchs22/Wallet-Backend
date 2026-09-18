@@ -259,15 +259,8 @@ def generate_merchant_api_keys_task(merchant_id):
         key = MerchantApiKey.objects.filter(merchant=merchant, mode=mode).first()
         if key:
             continue
-        secret = secrets.token_urlsafe(32)
-        public_key = f'{"live" if mode == MerchantMode.LIVE else "test"}_pk_{secrets.token_urlsafe(18)}'
-        MerchantApiKey.objects.create(
-            merchant=merchant,
-            mode=mode,
-            public_key=public_key,
-            secret_key_prefix=f'{"live" if mode == MerchantMode.LIVE else "test"}_sk_',
-            secret_key_hash=hashlib.sha256(secret.encode()).hexdigest(),
-        )
+        from wallet.services.merchants import generate_merchant_api_keys
+        generate_merchant_api_keys(merchant, mode)
     return {'merchant_id': merchant_id, 'status': 'ready'}
 
 

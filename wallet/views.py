@@ -27,7 +27,7 @@ from django.conf import settings
 from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent, AppUpdatePolicy,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
-    TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
+    TransactionType, TransactionStatus, LedgerDirection, WalletStatus, MerchantMode,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
 )
 from .serializers import (
@@ -352,6 +352,17 @@ class EmailLoginView(APIView):
             user.current_device_id = None
             user.save(update_fields=['current_device_id'])
         public_key_pem = (serializer.validated_data.get('public_key_pem') or '').strip()
+        if device is None and public_key_pem:
+            # Device IDs are account-scoped in newer clients. Reuse the
+            # existing trusted record when an older installation presents the
+            # same signing key for this account.
+            device = user.trusted_devices.filter(
+                public_key_pem=public_key_pem,
+                is_trusted=True,
+                revoked_at__isnull=True,
+            ).first()
+            if device is not None:
+                device_id = device.device_id
         if device is None and trusted_exists:
             if not device_id or not public_key_pem:
                 return Response({'error': 'A device ID and public signing key are required for new-device login.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -5383,13 +5394,23 @@ def merchant_dashboard(request):
     merchant = Merchant.objects.filter(user=request.user).first()
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
-    transactions = Transaction.objects.filter(recipient=request.user, status=TransactionStatus.COMPLETED)
-    volume = transactions.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    transactions = Transaction.objects.filter(recipient=request.user)
+    completed = transactions.filter(status=TransactionStatus.COMPLETED)
+    today = timezone.now() - timedelta(days=1)
+    today_completed = completed.filter(created_at__gte=today)
+    attempted_today = transactions.filter(created_at__gte=today)
+    volume = today_completed.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    success_rate = (
+        today_completed.count() * 100 / attempted_today.count()
+        if attempted_today.exists() else 0
+    )
+    recent = completed.order_by('-created_at')[:10]
     return Response({'merchant': MerchantSerializer(merchant).data, 'today_volume': str(volume),
-                     'transaction_count': transactions.count(), 'pending_settlements': '0.00',
+                     'success_rate': round(success_rate, 2),
+                     'transaction_count': completed.count(), 'pending_settlements': '0.00',
                      'available_balance': str(merchant.wallet.get_balance()),
                      'plan_usage': merchant_monthly_usage(merchant),
-                     'transactions': list(transactions.values('id', 'amount', 'currency', 'note', 'status', 'created_at')[:50]),
+                     'transactions': list(recent.values('id', 'amount', 'currency', 'note', 'status', 'created_at')),
                      'kyc_documents': list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')),
                      'settlements': list(merchant.settlements.values('id', 'amount', 'fees', 'currency', 'batch_reference', 'status', 'destination', 'created_at'))})
 
@@ -5417,23 +5438,19 @@ def merchant_kyc_documents(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def merchant_credentials(request):
+    from wallet.services.merchants import generate_merchant_api_keys
+
     merchant = Merchant.objects.filter(user=request.user).first()
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
     environment = request.data.get('environment', 'sandbox')
     if environment == 'live' and merchant.status != MerchantStatus.ACTIVE:
         return Response({'error': 'Live credentials require an approved merchant account'}, status=status.HTTP_403_FORBIDDEN)
-    secret = secrets.token_urlsafe(32)
-    public_key = f'{"live" if environment == "live" else "test"}_pk_{secrets.token_urlsafe(18)}'
-    if environment == 'live':
-        merchant.live_public_key = public_key
-        merchant.live_secret_hash = hashlib.sha256(secret.encode()).hexdigest()
-    else:
-        merchant.sandbox_public_key = public_key
-        merchant.sandbox_secret_hash = hashlib.sha256(secret.encode()).hexdigest()
+    mode = MerchantMode.LIVE if environment == 'live' else MerchantMode.SANDBOX
+    public_key, secret_key = generate_merchant_api_keys(merchant, mode)
     merchant.credentials_issued_at = timezone.now()
-    merchant.save(update_fields=['live_public_key', 'live_secret_hash', 'sandbox_public_key', 'sandbox_secret_hash', 'credentials_issued_at'])
-    return Response({'environment': environment, 'public_key': public_key, 'secret_key': f'{"live" if environment == "live" else "test"}_sk_{secret}'})
+    merchant.save(update_fields=['credentials_issued_at'])
+    return Response({'environment': environment, 'public_key': public_key, 'secret_key': secret_key})
 
 
 @api_view(['GET', 'PATCH'])
@@ -5443,9 +5460,22 @@ def merchant_webhook_config(request):
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PATCH':
-        merchant.webhook_url = str(request.data.get('webhook_url', merchant.webhook_url)).strip()
-        merchant.save(update_fields=['webhook_url'])
-    return Response({'webhook_url': merchant.webhook_url, 'events': ['payment.success', 'payment.failed', 'refund.processed', 'payout.completed'], 'secret_configured': bool(merchant.webhook_secret)})
+        webhook_url = str(request.data.get('webhook_url', merchant.webhook_url)).strip()
+        if webhook_url and not webhook_url.startswith('https://'):
+            return Response({'error': 'Webhook URL must use HTTPS'}, status=status.HTTP_400_BAD_REQUEST)
+        allowed_events = {'payment_intent.succeeded', 'payment_intent.failed', 'payment_intent.cancelled', 'payment_intent.expired'}
+        events = request.data.get('events', merchant.webhook_events)
+        if not isinstance(events, list) or any(event not in allowed_events for event in events):
+            return Response({'error': 'Invalid webhook event selection'}, status=status.HTTP_400_BAD_REQUEST)
+        merchant.webhook_url = webhook_url
+        merchant.webhook_events = events
+        merchant.save(update_fields=['webhook_url', 'webhook_events'])
+    return Response({
+        'webhook_url': merchant.webhook_url,
+        'events': merchant.webhook_events,
+        'available_events': ['payment_intent.succeeded', 'payment_intent.failed', 'payment_intent.cancelled', 'payment_intent.expired'],
+        'secret_configured': bool(merchant.webhook_secret),
+    })
 @extend_schema(
     responses={200: MerchantSerializer(many=True)},
     tags=['Merchants']

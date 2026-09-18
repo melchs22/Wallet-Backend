@@ -161,7 +161,7 @@ export const layout: RunTimeLayoutConfig = ({
  * @doc https://umijs.org/docs/max/request#配置
  */
 export const request: RequestConfig = {
-  baseURL: process.env.API_BASE_URL || '/api',
+  baseURL: process.env.API_BASE_URL || 'http://178.128.156.225/api',
   ...errorConfig,
 };
 

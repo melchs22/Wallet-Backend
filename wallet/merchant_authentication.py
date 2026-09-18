@@ -15,7 +15,7 @@ class MerchantApiKeyAuthentication(authentication.BaseAuthentication):
             return None
 
         raw_key = header[1].decode('utf-8')
-        if not raw_key.startswith('sk_'):
+        if not (raw_key.startswith('sk_live_') or raw_key.startswith('sk_test_')):
             return None
 
         mode = MerchantMode.LIVE if raw_key.startswith('sk_live_') else MerchantMode.SANDBOX

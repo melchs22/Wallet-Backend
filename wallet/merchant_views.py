@@ -1,9 +1,13 @@
+import csv
 import logging
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from rest_framework import status
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
+from django.http import StreamingHttpResponse
+from django.utils import timezone
 from rest_framework.response import Response
 
 from wallet.merchant_authentication import MerchantApiKeyAuthentication, MerchantApiKeyRateThrottle
@@ -12,8 +16,14 @@ from wallet.merchant_serializers import (
     FeePreviewQuerySerializer,
     PaymentIntentCreateSerializer,
     PaymentIntentSerializer,
+    MerchantDisputeCreateSerializer, MerchantDisputeSerializer,
+    MerchantRefundCreateSerializer, MerchantSettlementSerializer,
+    MerchantTransactionSerializer,
 )
-from wallet.models import Merchant, PaymentIntent, PaymentIntentStatus, WebhookDelivery
+from wallet.models import (
+    Dispute, DisputeStatus, Merchant, PaymentIntent, PaymentIntentStatus,
+    Settlement, Transaction, WebhookDelivery, WebhookDeliveryStatus,
+)
 from wallet.services.fees import preview_merchant_transfer_fee, resolve_fee
 from wallet.services.payment_intents import (
     PaymentIntentError,
@@ -42,6 +52,14 @@ def merchant_create_payment_intent(request):
 
     merchant = _merchant_from_request(request)
     mode = request.merchant_api_mode
+    idempotency_key = (request.headers.get('Idempotency-Key') or '').strip()
+    if len(idempotency_key) > 255:
+        return Response({'code': 'invalid_idempotency_key', 'message': 'Idempotency-Key must be 255 characters or fewer.'}, status=status.HTTP_400_BAD_REQUEST)
+    existing = PaymentIntent.objects.filter(
+        merchant=merchant,
+        mode=mode,
+        idempotency_key=idempotency_key,
+    ).first() if idempotency_key else None
 
     try:
         intent = create_payment_intent(
@@ -52,9 +70,10 @@ def merchant_create_payment_intent(request):
             description=serializer.validated_data.get('description', ''),
             mode=mode,
             return_url=serializer.validated_data.get('return_url', ''),
+            idempotency_key=idempotency_key,
         )
         data = PaymentIntentSerializer(intent).data
-        return Response(data, status=status.HTTP_201_CREATED)
+        return Response(data, status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED)
     except PaymentIntentError as exc:
         return Response({'code': exc.code, 'message': exc.message}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -188,3 +207,187 @@ def admin_merchant_webhook_deliveries(request, merchant_id):
 
     deliveries = WebhookDelivery.objects.filter(merchant_id=merchant_id).order_by('-created_at')[:100]
     return Response(WebhookDeliverySerializer(deliveries, many=True).data)
+
+
+def _merchant_transactions(merchant, mode):
+    return Transaction.objects.filter(
+        payment_intents__merchant=merchant,
+        payment_intents__mode=mode,
+    ).distinct().select_related('sender', 'recipient').prefetch_related('payment_intents')
+
+
+@api_view(['GET'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_transactions(request):
+    """List payment transactions belonging to this merchant."""
+    merchant = _merchant_from_request(request)
+    queryset = _merchant_transactions(merchant, request.merchant_api_mode)
+    for field in ('status', 'type', 'currency'):
+        value = request.query_params.get(field)
+        if value:
+            queryset = queryset.filter(**{field: value.lower() if field != 'currency' else value.upper()})
+    reference = request.query_params.get('external_reference')
+    if reference:
+        queryset = queryset.filter(payment_intents__external_reference=reference)
+    for name, lookup in (('from', 'created_at__gte'), ('to', 'created_at__lt')):
+        value = request.query_params.get(name)
+        if value:
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if timezone.is_naive(parsed):
+                    parsed = timezone.make_aware(parsed)
+                if name == 'to' and len(value) == 10:
+                    parsed = parsed.replace(hour=0, minute=0, second=0) + timedelta(days=1)
+                queryset = queryset.filter(**{lookup: parsed})
+            except ValueError:
+                return Response({'error': f'Invalid {name} date'}, status=status.HTTP_400_BAD_REQUEST)
+    queryset = queryset.order_by('-created_at')
+    if request.query_params.get('format') == 'csv':
+        response = StreamingHttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="merchant-transactions.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['id', 'type', 'status', 'amount', 'fee_amount', 'currency', 'created_at'])
+        for row in queryset[:5000]:
+            writer.writerow([row.id, row.type, row.status, row.amount, row.fee_amount, row.currency, row.created_at.isoformat()])
+        return response
+    limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
+    return Response(MerchantTransactionSerializer(queryset[:limit], many=True).data)
+
+
+@api_view(['GET'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_transaction_detail(request, transaction_id):
+    merchant = _merchant_from_request(request)
+    try:
+        transaction_obj = _merchant_transactions(merchant, request.merchant_api_mode).get(pk=transaction_id)
+    except (Transaction.DoesNotExist, ValueError):
+        return Response({'error': 'Transaction not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(MerchantTransactionSerializer(transaction_obj).data)
+
+
+@api_view(['GET'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_settlements(request):
+    merchant = _merchant_from_request(request)
+    settlements = Settlement.objects.filter(merchant=merchant).order_by('-created_at')
+    if request.query_params.get('status'):
+        settlements = settlements.filter(status=request.query_params['status'])
+    return Response(MerchantSettlementSerializer(settlements[:100], many=True).data)
+
+
+@api_view(['GET', 'PATCH'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_settings(request):
+    merchant = _merchant_from_request(request)
+    if request.method == 'PATCH':
+        allowed = {'business_name', 'business_email', 'website_url', 'description',
+                   'logo_url', 'contact_email', 'contact_phone', 'address', 'tax_id',
+                   'webhook_url', 'webhook_events'}
+        unknown = set(request.data) - allowed
+        if unknown:
+            return Response({'error': f'Unsupported settings: {", ".join(sorted(unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+        for field in allowed & set(request.data):
+            setattr(merchant, field, request.data[field])
+        merchant.save(update_fields=list(allowed & set(request.data)) + ['updated_at'])
+    return Response({
+        'business_name': merchant.business_name, 'business_email': merchant.business_email,
+        'website_url': merchant.website_url, 'description': merchant.description,
+        'logo_url': merchant.logo_url, 'contact_email': merchant.contact_email,
+        'contact_phone': merchant.contact_phone, 'address': merchant.address,
+        'tax_id': merchant.tax_id, 'webhook_url': merchant.webhook_url,
+        'webhook_events': merchant.webhook_events,
+    })
+
+
+def _merchant_dispute_queryset(merchant, mode):
+    return Dispute.objects.filter(
+        transaction__payment_intents__merchant=merchant,
+        transaction__payment_intents__mode=mode,
+    ).distinct().select_related('transaction')
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_disputes(request):
+    merchant = _merchant_from_request(request)
+    if request.method == 'GET':
+        disputes = _merchant_dispute_queryset(merchant, request.merchant_api_mode)
+        if request.query_params.get('status'):
+            disputes = disputes.filter(status=request.query_params['status'])
+        return Response(MerchantDisputeSerializer(disputes[:100], many=True).data)
+    serializer = MerchantDisputeCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        transaction_obj = _merchant_transactions(merchant, request.merchant_api_mode).get(
+            pk=serializer.validated_data['transaction_id']
+        )
+    except (Transaction.DoesNotExist, ValueError):
+        return Response({'error': 'Transaction not found'}, status=status.HTTP_404_NOT_FOUND)
+    dispute = Dispute.objects.create(
+        transaction=transaction_obj, opened_by=merchant.user,
+        reason=serializer.validated_data['reason'],
+        evidence_notes=serializer.validated_data['evidence_notes'],
+    )
+    return Response(MerchantDisputeSerializer(dispute).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_dispute_detail(request, dispute_id):
+    try:
+        dispute = _merchant_dispute_queryset(_merchant_from_request(request), request.merchant_api_mode).get(pk=dispute_id)
+    except Dispute.DoesNotExist:
+        return Response({'error': 'Dispute not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(MerchantDisputeSerializer(dispute).data)
+
+
+@api_view(['POST'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_refund(request):
+    """Create a refund request using the existing dispute workflow."""
+    serializer = MerchantRefundCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    merchant = _merchant_from_request(request)
+    try:
+        transaction_obj = _merchant_transactions(merchant, request.merchant_api_mode).get(pk=serializer.validated_data['transaction_id'])
+    except (Transaction.DoesNotExist, ValueError):
+        return Response({'error': 'Transaction not found'}, status=status.HTTP_404_NOT_FOUND)
+    dispute = Dispute.objects.create(
+        transaction=transaction_obj, opened_by=merchant.user,
+        reason=f"Refund requested: {serializer.validated_data['reason']}".strip(),
+        evidence_notes=serializer.validated_data['evidence_notes'],
+    )
+    return Response({'refund_id': dispute.id, 'status': dispute.status, 'transaction_id': str(transaction_obj.id)}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@authentication_classes([MerchantApiKeyAuthentication])
+@permission_classes([AllowAny])
+@throttle_classes([MerchantApiKeyRateThrottle])
+def merchant_webhook_retry(request, delivery_id):
+    merchant = _merchant_from_request(request)
+    try:
+        delivery = WebhookDelivery.objects.get(pk=delivery_id, merchant=merchant)
+    except WebhookDelivery.DoesNotExist:
+        return Response({'error': 'Webhook delivery not found'}, status=status.HTTP_404_NOT_FOUND)
+    if delivery.status == WebhookDeliveryStatus.DELIVERED:
+        return Response({'error': 'Webhook has already been delivered'}, status=status.HTTP_409_CONFLICT)
+    from wallet.tasks import deliver_webhook_task
+    task = deliver_webhook_task.delay(delivery.id)
+    return Response({'delivery_id': delivery.id, 'status': 'queued', 'celery_task_id': task.id}, status=status.HTTP_202_ACCEPTED)

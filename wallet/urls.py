@@ -34,6 +34,7 @@ from . import admin_api
 
 
 urlpatterns = [
+    path('merchant-api/', include('wallet.merchant_urls')),
     # Authentication
     path('auth/google', GoogleAuthView.as_view(), name='google_auth'),
     path('auth/signup', EmailSignupView.as_view(), name='email_signup'),

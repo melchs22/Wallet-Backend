@@ -2,7 +2,10 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from wallet.models import Merchant, MerchantMode, PaymentIntent, PaymentIntentStatus, WebhookDelivery
+from wallet.models import (
+    Dispute, Merchant, MerchantMode, PaymentIntent, PaymentIntentStatus,
+    Settlement, Transaction, WebhookDelivery,
+)
 
 
 class PaymentIntentCreateSerializer(serializers.Serializer):
@@ -79,3 +82,66 @@ class MerchantDetailAdminSerializer(serializers.ModelSerializer):
             key.mode: key.public_key
             for key in obj.api_keys.filter(is_active=True)
         }
+
+
+class MerchantTransactionSerializer(serializers.ModelSerializer):
+    sender = serializers.SerializerMethodField()
+    recipient = serializers.SerializerMethodField()
+    payment_intent_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Transaction
+        fields = [
+            'id', 'type', 'status', 'amount', 'fee_amount', 'currency', 'note',
+            'sender', 'recipient', 'payment_intent_id', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def _user(self, user):
+        if not user:
+            return None
+        return {'id': user.id, 'handle': user.handle, 'display_name': user.display_name}
+
+    def get_sender(self, obj):
+        return self._user(obj.sender)
+
+    def get_recipient(self, obj):
+        return self._user(obj.recipient)
+
+    def get_payment_intent_id(self, obj):
+        intent = obj.payment_intents.first()
+        return intent.id if intent else None
+
+
+class MerchantSettlementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Settlement
+        fields = [
+            'id', 'amount', 'fees', 'currency', 'batch_reference', 'status',
+            'destination', 'created_at', 'completed_at',
+        ]
+        read_only_fields = fields
+
+
+class MerchantDisputeSerializer(serializers.ModelSerializer):
+    transaction_id = serializers.ReadOnlyField(source='transaction_id')
+
+    class Meta:
+        model = Dispute
+        fields = [
+            'id', 'transaction_id', 'reason', 'evidence_notes', 'status',
+            'resolution_notes', 'created_at', 'updated_at', 'resolved_at',
+        ]
+        read_only_fields = fields
+
+
+class MerchantDisputeCreateSerializer(serializers.Serializer):
+    transaction_id = serializers.IntegerField()
+    reason = serializers.CharField(max_length=2000)
+    evidence_notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class MerchantRefundCreateSerializer(serializers.Serializer):
+    transaction_id = serializers.IntegerField()
+    reason = serializers.CharField(max_length=2000, required=False, allow_blank=True, default='')
+    evidence_notes = serializers.CharField(required=False, allow_blank=True, default='')

@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -46,7 +46,17 @@ def checkout_url_for_intent(intent):
     return f'{base.rstrip("/")}/checkout/{intent.id}'
 
 
-def create_payment_intent(merchant, *, amount, currency, external_reference='', description='', mode, return_url=''):
+def create_payment_intent(
+    merchant,
+    *,
+    amount,
+    currency,
+    external_reference='',
+    description='',
+    mode,
+    return_url='',
+    idempotency_key='',
+):
     if merchant.status != MerchantStatus.ACTIVE:
         raise PaymentIntentError('merchant_not_active', 'Merchant account is not active')
 
@@ -58,16 +68,36 @@ def create_payment_intent(merchant, *, amount, currency, external_reference='', 
         if used >= subscription.plan.monthly_transaction_limit:
             raise PaymentIntentError('plan_limit_reached', 'Your monthly payment-intent limit has been reached')
 
-    intent = PaymentIntent.objects.create(
-        merchant=merchant,
-        amount=amount,
-        currency=currency,
-        external_reference=external_reference,
-        description=description,
-        mode=mode,
-        return_url=return_url,
-        status=PaymentIntentStatus.CREATED,
-    )
+    if idempotency_key:
+        existing = PaymentIntent.objects.filter(
+            merchant=merchant,
+            mode=mode,
+            idempotency_key=idempotency_key,
+        ).first()
+        if existing:
+            return existing
+
+    try:
+        with transaction.atomic():
+            intent = PaymentIntent.objects.create(
+                merchant=merchant,
+                amount=amount,
+                currency=currency,
+                external_reference=external_reference,
+                description=description,
+                mode=mode,
+                return_url=return_url,
+                idempotency_key=idempotency_key or None,
+                status=PaymentIntentStatus.CREATED,
+            )
+    except IntegrityError:
+        if not idempotency_key:
+            raise
+        intent = PaymentIntent.objects.get(
+            merchant=merchant,
+            mode=mode,
+            idempotency_key=idempotency_key,
+        )
     intent.status = PaymentIntentStatus.PENDING_PAYMENT
     intent.save(update_fields=['status'])
     return intent

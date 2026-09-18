@@ -70,12 +70,13 @@ def sign_webhook_payload(payload_bytes, secret):
 
 
 def enqueue_payment_intent_webhook(intent, event_type):
-    if not intent.merchant.webhook_url:
+    merchant = intent.merchant
+    if not merchant.webhook_url or (merchant.webhook_events and event_type not in merchant.webhook_events):
         return None
 
     payload = build_payment_intent_payload(intent, event_type)
     delivery = WebhookDelivery.objects.create(
-        merchant=intent.merchant,
+        merchant=merchant,
         payment_intent=intent,
         event_type=event_type,
         target_url=intent.merchant.webhook_url,
@@ -121,7 +122,9 @@ def enqueue_transaction_approval_webhook(approval, event_type, webhook_url=None,
 def deliver_webhook(delivery_id):
     delivery = WebhookDelivery.objects.select_related('merchant', 'payment_intent').get(pk=delivery_id)
     payload_bytes = json.dumps(delivery.payload, sort_keys=True, separators=(',', ':')).encode()
-    signature = sign_webhook_payload(payload_bytes, delivery.merchant.webhook_secret)
+    timestamp = str(int(delivery.created_at.timestamp()))
+    signature_payload = f'{timestamp}.'.encode() + payload_bytes
+    signature = sign_webhook_payload(signature_payload, delivery.merchant.webhook_secret)
 
     delivery.attempt_count += 1
     try:
@@ -131,6 +134,8 @@ def deliver_webhook(delivery_id):
             headers={
                 'Content-Type': 'application/json',
                 'X-Wallet-Signature': signature,
+                'X-Wallet-Timestamp': timestamp,
+                'X-Wallet-Delivery-ID': str(delivery.id),
             },
             timeout=15,
         )

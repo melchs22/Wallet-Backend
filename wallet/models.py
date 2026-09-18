@@ -1041,6 +1041,7 @@ class Merchant(models.Model):
     mode = models.CharField(max_length=10, choices=MerchantMode.choices, default=MerchantMode.SANDBOX)
     webhook_url = models.URLField(blank=True, default='')
     webhook_secret = models.CharField(max_length=64, blank=True, default='')
+    webhook_events = models.JSONField(default=list, blank=True)
     sandbox_public_key = models.CharField(max_length=80, blank=True, default='')
     sandbox_secret_hash = models.CharField(max_length=128, blank=True, default='')
     live_public_key = models.CharField(max_length=80, blank=True, default='')
@@ -1128,6 +1129,7 @@ class PaymentIntent(models.Model):
     merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='payment_intents')
     payer = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='payment_intents')
     resulting_transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='payment_intents')
+    idempotency_key = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1137,6 +1139,14 @@ class PaymentIntent(models.Model):
             models.Index(fields=['merchant', 'status', 'created_at']),
             models.Index(fields=['status', 'expires_at']),
             models.Index(fields=['external_reference']),
+            models.Index(fields=['merchant', 'mode', 'idempotency_key']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['merchant', 'mode', 'idempotency_key'],
+                condition=models.Q(idempotency_key__isnull=False),
+                name='unique_merchant_intent_idempotency',
+            ),
         ]
 
 
