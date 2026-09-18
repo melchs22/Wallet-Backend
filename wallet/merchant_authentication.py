@@ -11,12 +11,14 @@ class MerchantApiKeyAuthentication(authentication.BaseAuthentication):
 
     def authenticate(self, request):
         header = authentication.get_authorization_header(request).split()
-        if not header or header[0].lower() != self.keyword.lower().encode() or len(header) != 2:
+        if not header:
             return None
+        if header[0].lower() != self.keyword.lower().encode() or len(header) != 2:
+            raise exceptions.AuthenticationFailed('Use Authorization: Bearer <merchant secret key>.')
 
         raw_key = header[1].decode('utf-8')
         if not (raw_key.startswith('sk_live_') or raw_key.startswith('sk_test_')):
-            return None
+            raise exceptions.AuthenticationFailed('Invalid merchant API key format.')
 
         mode = MerchantMode.LIVE if raw_key.startswith('sk_live_') else MerchantMode.SANDBOX
         prefix = raw_key[:20]

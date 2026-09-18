@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta
 
 from django.conf import settings
-from rest_framework import status
+from rest_framework import exceptions, status
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from django.http import StreamingHttpResponse
@@ -38,7 +38,15 @@ logger = logging.getLogger(__name__)
 
 
 def _merchant_from_request(request):
-    return request.user.merchant_account
+    user = getattr(request, 'user', None)
+    if not user or not getattr(user, 'is_authenticated', False):
+        raise exceptions.NotAuthenticated('A valid merchant API key is required.')
+    merchant = getattr(user, 'merchant_account', None)
+    if merchant is None:
+        raise exceptions.AuthenticationFailed('The API credential is not linked to a merchant account.')
+    if not getattr(request, 'merchant_api_mode', None):
+        raise exceptions.AuthenticationFailed('Merchant API authentication is required.')
+    return merchant
 
 
 @api_view(['POST'])
