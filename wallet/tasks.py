@@ -255,12 +255,8 @@ def generate_transaction_export(export_id, filters=None):
 def generate_merchant_api_keys_task(merchant_id):
     """Ensure approved merchants have API key records for sandbox and live modes."""
     merchant = Merchant.objects.get(pk=merchant_id)
-    for mode in (MerchantMode.SANDBOX, MerchantMode.LIVE):
-        key = MerchantApiKey.objects.filter(merchant=merchant, mode=mode).first()
-        if key:
-            continue
-        from wallet.services.merchants import generate_merchant_api_keys
-        generate_merchant_api_keys(merchant, mode)
+    from wallet.services.merchants import ensure_merchant_api_keys_on_activation
+    ensure_merchant_api_keys_on_activation(merchant)
     return {'merchant_id': merchant_id, 'status': 'ready'}
 
 

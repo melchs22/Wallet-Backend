@@ -57,7 +57,7 @@ def create_payment_intent(
     return_url='',
     idempotency_key='',
 ):
-    if merchant.status != MerchantStatus.ACTIVE:
+    if merchant.status != MerchantStatus.ACTIVE and mode != MerchantMode.SANDBOX:
         raise PaymentIntentError('merchant_not_active', 'Merchant account is not active')
 
     subscription = getattr(merchant, 'subscription', None)

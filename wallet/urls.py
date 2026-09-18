@@ -19,7 +19,7 @@ from .views import (
     create_scheduled_transfer, list_scheduled_transfers, get_scheduled_transfer_detail,
     pause_scheduled_transfer, resume_scheduled_transfer, cancel_scheduled_transfer,
     create_merchant_account, get_merchant_account, generate_merchant_qr,
-    merchant_dashboard, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
+    merchant_dashboard, merchant_payout_schedule, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
     merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant,
     supported_countries, app_update_status, legal_document, legal_document_html, provider_catalog,
     change_password, UserKYCSubmissionView, login_status, confirm_login, trusted_devices, revoke_trusted_device
@@ -215,6 +215,7 @@ urlpatterns = [
     path('merchants/me/subscription', merchant_subscription, name='merchant_subscription'),
     path('merchants/me/qr', generate_merchant_qr, name='generate_merchant_qr'),
     path('merchants/me/dashboard', merchant_dashboard, name='merchant_dashboard'),
+    path('merchants/me/payout-schedule', merchant_payout_schedule, name='merchant_payout_schedule'),
     path('merchants/me/logs', merchant_logs, name='merchant_logs'),
     path('merchants/me/payment-links', merchant_payment_links, name='merchant_payment_links'),
     path('merchants/me/payment-links/<int:intent_id>/deactivate', deactivate_merchant_payment_link, name='deactivate_merchant_payment_link'),

@@ -29,7 +29,8 @@ class MerchantApiKeyAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed('Invalid API key')
 
         merchant = api_key.merchant
-        if merchant.status != MerchantStatus.ACTIVE:
+        # Sandbox integrations are available while compliance reviews are pending.
+        if merchant.status != MerchantStatus.ACTIVE and mode == MerchantMode.LIVE:
             raise exceptions.AuthenticationFailed('Merchant account is not active')
 
         request.merchant_api_mode = mode

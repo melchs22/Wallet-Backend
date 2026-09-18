@@ -28,7 +28,7 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent, AppUpdatePolicy,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus, MerchantMode,
-    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, TransactionApproval,
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule, TransactionApproval,
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
@@ -5200,11 +5200,12 @@ def create_merchant_account(request):
                 tax_id=tax_id,
                 status=MerchantStatus.PENDING
             )
-            sandbox_secret = secrets.token_urlsafe(32)
-            merchant.sandbox_public_key = f'test_pk_{secrets.token_urlsafe(18)}'
-            merchant.sandbox_secret_hash = hashlib.sha256(sandbox_secret.encode()).hexdigest()
+            from .services.merchants import ensure_sandbox_wallet, generate_merchant_api_keys
+            ensure_sandbox_wallet(merchant)
+            sandbox_public, sandbox_secret = generate_merchant_api_keys(merchant, MerchantMode.SANDBOX)
+            merchant.sandbox_public_key = sandbox_public
             merchant.credentials_issued_at = timezone.now()
-            merchant.save(update_fields=['sandbox_public_key', 'sandbox_secret_hash', 'credentials_issued_at'])
+            merchant.save(update_fields=['sandbox_public_key', 'credentials_issued_at'])
             now = timezone.now()
             MerchantSubscription.objects.create(
                 merchant=merchant,
@@ -5222,7 +5223,7 @@ def create_merchant_account(request):
             )
 
             return Response(
-                {**MerchantSerializer(merchant).data, 'sandbox_credentials': {'public_key': merchant.sandbox_public_key, 'secret_key': f'test_sk_{sandbox_secret}'}},
+                {**MerchantSerializer(merchant).data, 'sandbox_credentials': {'public_key': sandbox_public, 'secret_key': sandbox_secret}},
                 status=status.HTTP_201_CREATED
             )
 
@@ -5264,6 +5265,27 @@ def get_merchant_account(request):
     except Exception as e:
         logger.error(f'generate_merchant_qr_error: {str(e)}')
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def merchant_payout_schedule(request):
+    merchant = Merchant.objects.filter(user=request.user).first()
+    if not merchant:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    schedule, _ = MerchantPayoutSchedule.objects.get_or_create(merchant=merchant)
+    if request.method == 'PATCH':
+        allowed = {'frequency', 'destination', 'enabled', 'next_payout_at'}
+        unknown = set(request.data) - allowed
+        if unknown:
+            return Response({'error': f'Unsupported fields: {", ".join(sorted(unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+        if 'frequency' in request.data and request.data['frequency'] not in dict(MerchantPayoutSchedule.Frequency.choices):
+            return Response({'error': 'Invalid payout frequency'}, status=status.HTTP_400_BAD_REQUEST)
+        for field in allowed & set(request.data): setattr(schedule, field, request.data[field])
+        schedule.save()
+    return Response({'frequency': schedule.frequency, 'destination': schedule.destination, 'enabled': schedule.enabled, 'next_payout_at': schedule.next_payout_at, 'last_payout_at': schedule.last_payout_at})
 
 
 @api_view(['GET'])
@@ -5444,6 +5466,8 @@ def merchant_credentials(request):
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
     environment = request.data.get('environment', 'sandbox')
+    if environment not in ('sandbox', 'live'):
+        return Response({'error': 'environment must be sandbox or live'}, status=status.HTTP_400_BAD_REQUEST)
     if environment == 'live' and merchant.status != MerchantStatus.ACTIVE:
         return Response({'error': 'Live credentials require an approved merchant account'}, status=status.HTTP_403_FORBIDDEN)
     mode = MerchantMode.LIVE if environment == 'live' else MerchantMode.SANDBOX

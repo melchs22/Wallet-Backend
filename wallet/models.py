@@ -1266,6 +1266,24 @@ class Settlement(models.Model):
         ordering = ['-created_at']
 
 
+class MerchantPayoutSchedule(models.Model):
+    class Frequency(models.TextChoices):
+        DAILY = 'daily', 'Daily'
+        WEEKLY = 'weekly', 'Weekly'
+        MONTHLY = 'monthly', 'Monthly'
+
+    merchant = models.OneToOneField(Merchant, on_delete=models.CASCADE, related_name='payout_schedule')
+    frequency = models.CharField(max_length=20, choices=Frequency.choices, default=Frequency.DAILY)
+    destination = models.CharField(max_length=255, blank=True, default='')
+    enabled = models.BooleanField(default=True)
+    next_payout_at = models.DateTimeField(null=True, blank=True)
+    last_payout_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'merchant_payout_schedules'
+
+
 class TransactionApproval(models.Model):
     """
     Model for transaction approval requests.

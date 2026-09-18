@@ -8,7 +8,7 @@ from .models import (
     ProcessedRequest, AuditLog, TransferAttempt,
     LinkedProvider, ExchangeRate, Dispute, PaymentRequest, SplitRequest, SystemSetting,
     MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
-    PushDevice,
+    PushDevice, MerchantApiKey, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule,
     TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
     SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission, AppUpdatePolicy,
 )
@@ -435,9 +435,9 @@ class ScheduledTransferAdmin(admin.ModelAdmin):
 
 @admin.register(Merchant)
 class MerchantAdmin(admin.ModelAdmin):
-    list_display = ['id', 'business_name', 'user', 'status', 'created_at']
-    list_filter = ['status']
-    search_fields = ['user__handle', 'business_name']
+    list_display = ['id', 'business_name', 'user', 'status', 'mode', 'approved_at', 'created_at']
+    list_filter = ['status', 'mode', 'created_at']
+    search_fields = ['user__handle', 'user__email', 'business_name', 'business_email']
     readonly_fields = [
         'static_qr_code', 'static_qr_payload', 'static_qr_signature',
         'approved_at', 'created_at', 'updated_at',
@@ -445,10 +445,16 @@ class MerchantAdmin(admin.ModelAdmin):
     actions = ['approve_merchants', 'reject_merchants', 'generate_api_keys']
 
     def approve_merchants(self, request, queryset):
-        count = queryset.filter(status='pending').update(
-            status='active', approved_by=request.user, approved_at=timezone.now()
-        )
-        self.message_user(request, f'{count} merchants approved.', messages.SUCCESS)
+        from .services.merchants import ensure_merchant_api_keys_on_activation
+        count = 0
+        for merchant in queryset.filter(status='pending'):
+            merchant.status = 'active'
+            merchant.approved_by = request.user
+            merchant.approved_at = timezone.now()
+            merchant.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+            ensure_merchant_api_keys_on_activation(merchant)
+            count += 1
+        self.message_user(request, f'{count} merchants approved and credentials provisioned.', messages.SUCCESS)
     approve_merchants.short_description = 'Approve selected merchants'
 
     def reject_merchants(self, request, queryset):
@@ -459,8 +465,49 @@ class MerchantAdmin(admin.ModelAdmin):
     reject_merchants.short_description = 'Reject selected merchants'
 
     def generate_api_keys(self, request, queryset):
-        self.message_user(request, 'Merchant API keys require the merchant payment schema migration.', messages.WARNING)
+        from .services.merchants import ensure_merchant_api_keys_on_activation
+        for merchant in queryset:
+            ensure_merchant_api_keys_on_activation(merchant)
+        self.message_user(request, f'Credentials provisioned for {queryset.count()} merchants.', messages.SUCCESS)
     generate_api_keys.short_description = 'Generate API keys (live mode)'
+
+
+@admin.register(MerchantApiKey)
+class MerchantApiKeyAdmin(admin.ModelAdmin):
+    list_display = ['public_key', 'merchant', 'mode', 'is_active', 'created_at']
+    list_filter = ['mode', 'is_active']
+    search_fields = ['public_key', 'merchant__business_name', 'merchant__user__email']
+    readonly_fields = ['public_key', 'secret_key_prefix', 'secret_key_hash', 'created_at']
+
+
+@admin.register(MerchantSubscription)
+class MerchantSubscriptionAdmin(admin.ModelAdmin):
+    list_display = ['merchant', 'plan', 'status', 'current_period_end', 'cancel_at_period_end']
+    list_filter = ['status', 'cancel_at_period_end']
+    search_fields = ['merchant__business_name', 'merchant__user__email']
+
+
+@admin.register(KYCDocument)
+class KYCDocumentAdmin(admin.ModelAdmin):
+    list_display = ['merchant', 'document_type', 'status', 'reviewed_by', 'created_at', 'updated_at']
+    list_filter = ['document_type', 'status']
+    search_fields = ['merchant__business_name', 'merchant__user__email']
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(Settlement)
+class SettlementAdmin(admin.ModelAdmin):
+    list_display = ['batch_reference', 'merchant', 'amount', 'fees', 'currency', 'status', 'created_at', 'completed_at']
+    list_filter = ['status', 'currency', 'created_at']
+    search_fields = ['batch_reference', 'merchant__business_name', 'merchant__user__email']
+    readonly_fields = ['created_at']
+
+
+@admin.register(MerchantPayoutSchedule)
+class MerchantPayoutScheduleAdmin(admin.ModelAdmin):
+    list_display = ['merchant', 'frequency', 'destination', 'enabled', 'next_payout_at', 'last_payout_at']
+    list_filter = ['frequency', 'enabled']
+    search_fields = ['merchant__business_name', 'merchant__user__email', 'destination']
 
 
 @admin.register(TransactionApproval)
