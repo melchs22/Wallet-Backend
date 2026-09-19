@@ -105,6 +105,7 @@ def create_otp_challenge(user, purpose, request, *, device_id=None, platform='',
         device=device,
         purpose=purpose,
         code_hash=make_password(code),
+        dev_code=code if settings.DEBUG else '',
         expires_at=timezone.now() + OTP_TTL,
         **_request_metadata(request),
     )

@@ -531,6 +531,7 @@ class OtpChallenge(models.Model):
     device = models.ForeignKey(TrustedDevice, on_delete=models.SET_NULL, null=True, blank=True, related_name='otp_challenges')
     purpose = models.CharField(max_length=30, choices=Purpose.choices)
     code_hash = models.CharField(max_length=128)
+    dev_code = models.CharField(max_length=6, blank=True, default='')
     expires_at = models.DateTimeField()
     consumed_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)

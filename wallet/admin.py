@@ -227,10 +227,10 @@ class TrustedDeviceAdmin(admin.ModelAdmin):
 
 @admin.register(OtpChallenge)
 class OtpChallengeAdmin(admin.ModelAdmin):
-    list_display = ['user', 'purpose', 'device', 'attempts', 'expires_at', 'consumed_at', 'created_at']
+    list_display = ['user', 'purpose', 'device', 'dev_code', 'attempts', 'expires_at', 'consumed_at', 'created_at']
     list_filter = ['purpose', 'consumed_at']
     search_fields = ['user__email', 'user__handle', 'request_id']
-    readonly_fields = ['user', 'device', 'purpose', 'code_hash', 'expires_at', 'consumed_at', 'attempts', 'max_attempts', 'locked_until', 'request_id', 'ip_address', 'user_agent', 'created_at']
+    readonly_fields = ['user', 'device', 'purpose', 'code_hash', 'dev_code', 'expires_at', 'consumed_at', 'attempts', 'max_attempts', 'locked_until', 'request_id', 'ip_address', 'user_agent', 'created_at']
 
     def has_add_permission(self, request):
         return False
