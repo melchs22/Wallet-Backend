@@ -1,0 +1,18 @@
+[Unit]
+Description=DSD PAY operations portal
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/backend/Wallet-Backend/operations-portal
+Environment=NODE_ENV=production
+Environment=PORT=3100
+ExecStart=/usr/bin/npm run preview -- --port 3100
+Restart=always
+RestartSec=5
+EnvironmentFile=-/var/www/backend/Wallet-Backend/operations-portal/.env
+
+[Install]
+WantedBy=multi-user.target
