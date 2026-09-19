@@ -27,6 +27,7 @@ class MerchantTeamMemberAdmin(admin.ModelAdmin):
     list_display = ['merchant', 'email', 'role', 'is_active', 'invited_at']
     list_filter = ['role', 'is_active']
     search_fields = ['merchant__business_name', 'email', 'user__email']
+    readonly_fields = ['credentials_issued_at']
 
 
 @admin.register(SupportedCountry)
@@ -450,12 +451,13 @@ class ScheduledTransferAdmin(admin.ModelAdmin):
 
 @admin.register(Merchant)
 class MerchantAdmin(admin.ModelAdmin):
-    list_display = ['id', 'business_name', 'user', 'status', 'mode', 'approved_at', 'created_at']
+    list_display = ['id', 'business_name', 'public_identifier', 'user', 'status', 'mode', 'approved_at', 'created_at']
     list_filter = ['status', 'mode', 'created_at']
     search_fields = ['user__handle', 'user__email', 'business_name', 'business_email']
     readonly_fields = [
         'static_qr_code', 'static_qr_payload', 'static_qr_signature',
         'approved_at', 'created_at', 'updated_at',
+        'public_identifier',
     ]
     actions = ['approve_merchants', 'reject_merchants', 'generate_api_keys']
 

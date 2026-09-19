@@ -732,6 +732,7 @@ class ProviderCatalog(models.Model):
     code = models.CharField(max_length=30, unique=True)
     name = models.CharField(max_length=100)
     logo_url = models.URLField(blank=True, default='')
+    payment_options = models.JSONField(default=list, blank=True)
     active = models.BooleanField(default=True)
     sort_order = models.PositiveIntegerField(default=0)
 
@@ -1029,6 +1030,7 @@ class Merchant(models.Model):
         related_name='merchant_account'
     )
     business_name = models.CharField(max_length=200)
+    public_identifier = models.SlugField(max_length=80, unique=True, blank=True, null=True, db_index=True)
     business_email = models.EmailField(blank=True, default='')
     website_url = models.URLField(blank=True, default='')
     business_type = models.CharField(max_length=100, blank=True, default='')
@@ -1063,6 +1065,7 @@ class Merchant(models.Model):
         blank=True,
     )
     logo_url = models.URLField(blank=True, default='')
+    logo = models.FileField(upload_to='merchants/logos/%Y/%m/', blank=True, null=True)
     contact_email = models.EmailField(blank=True, default='')
     contact_phone = models.CharField(max_length=20, blank=True, default='')
     address = models.TextField(blank=True, default='')
@@ -1124,6 +1127,7 @@ class MerchantTeamMember(models.Model):
     invited_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='sent_merchant_invitations')
     invited_at = models.DateTimeField(auto_now_add=True)
     accepted_at = models.DateTimeField(null=True, blank=True)
+    credentials_issued_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'merchant_team_members'

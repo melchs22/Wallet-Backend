@@ -136,7 +136,7 @@ class LegalDocumentSerializer(serializers.ModelSerializer):
 class ProviderCatalogSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProviderCatalog
-        fields = ['code', 'name', 'logo_url']
+        fields = ['code', 'name', 'logo_url', 'payment_options']
 
 
 class UserKYCSubmissionSerializer(serializers.ModelSerializer):
@@ -754,16 +754,18 @@ class MerchantSerializer(serializers.ModelSerializer):
         model = Merchant
         fields = [
             'id', 'user', 'user_handle', 'business_name',
+            'public_identifier',
             'business_type', 'description', 'status',
             'static_qr_code', 'static_qr_payload', 'static_qr_signature',
             'wallet', 'wallet_currency', 'logo_url', 'contact_email', 'contact_phone',
             'address', 'tax_id', 'approved_by', 'approved_at', 'rejection_reason',
             'created_at', 'updated_at', 'plan', 'website_url', 'business_email',
-            'sandbox_public_key', 'live_public_key', 'credentials_issued_at'
+            'sandbox_public_key', 'live_public_key', 'credentials_issued_at', 'logo'
         ]
         read_only_fields = ['id', 'user', 'static_qr_code', 'static_qr_payload', 'static_qr_signature',
                            'approved_by', 'approved_at', 'rejection_reason', 'created_at', 'updated_at',
-                           'sandbox_public_key', 'live_public_key', 'credentials_issued_at']
+                           'sandbox_public_key', 'live_public_key', 'credentials_issued_at',
+                           'public_identifier', 'logo']
 
     def get_plan(self, obj):
         subscription = getattr(obj, 'subscription', None)

@@ -1,11 +1,13 @@
 import csv
 import logging
+import secrets
 from datetime import datetime, timedelta
 
 from django.conf import settings
 from rest_framework import exceptions, status
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes, parser_classes
+from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from django.http import StreamingHttpResponse
 from django.utils import timezone
@@ -24,7 +26,8 @@ from wallet.merchant_serializers import (
 )
 from wallet.models import (
     Dispute, DisputeStatus, Merchant, MerchantTeamMember, MerchantTeamRole,
-    PaymentIntent, PaymentIntentStatus,
+    PaymentIntent, PaymentIntentStatus, PaymentRequest,
+    MerchantStatus,
     Settlement, Transaction, WebhookDelivery, WebhookDeliveryStatus,
 )
 from wallet.services.limits import merchant_limit_snapshot
@@ -36,6 +39,8 @@ from wallet.services.payment_intents import (
     create_payment_intent,
     get_checkout_public_detail,
 )
+from wallet.services.merchants import merchant_public_identifier
+from wallet.services.notifications import create_notification_record, deliver_notification
 from wallet.models import FeeAppliesTo
 
 logger = logging.getLogger(__name__)
@@ -111,13 +116,41 @@ def merchant_team(request):
         return Response({'error': 'A valid email is required.'}, status=status.HTTP_400_BAD_REQUEST)
     if member_role == MerchantTeamRole.OWNER or member_role not in MerchantTeamRole.values:
         return Response({'error': 'Invalid team role.'}, status=status.HTTP_400_BAD_REQUEST)
-    user = __import__('wallet.models', fromlist=['User']).User.objects.filter(email__iexact=email).first()
+    from wallet.models import User
+    user = User.objects.filter(email__iexact=email).first()
+    temporary_password = None
+    if user is None:
+        temporary_password = secrets.token_urlsafe(12)
+        local_part = email.split('@', 1)[0]
+        handle = ''.join(c for c in local_part.lower() if c.isalnum() or c == '_')[:45] or 'team'
+        base_handle = handle
+        suffix = 2
+        while User.objects.filter(handle=handle).exists():
+            handle = f'{base_handle}{suffix}'
+            suffix += 1
+        user = User.objects.create_user(
+            email=email, password=temporary_password, handle=handle,
+            display_name=local_part, must_change_password=True,
+        )
     member, created = MerchantTeamMember.objects.update_or_create(
         merchant=merchant, email=email,
         defaults={'user': user, 'role': member_role, 'is_active': True, 'invited_by': request.user},
     )
-    return Response({'id': member.id, 'email': member.email, 'user_id': member.user_id, 'role': member.role,
-                     'is_active': member.is_active}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+    payload = {'id': member.id, 'email': member.email, 'user_id': member.user_id, 'role': member.role,
+               'is_active': member.is_active, 'invitation': {
+                   'email': email, 'role': member.role,
+                   'login_url': request.build_absolute_uri('/api/auth/login'),
+                   'whatsapp_text': f'You have been invited to join {merchant.business_name} as {member.role}.',
+               }}
+    if temporary_password:
+        payload['invitation']['temporary_password'] = temporary_password
+        payload['invitation']['whatsapp_text'] += (
+            f' Login email: {email}. Temporary password: {temporary_password}. '
+            'Change it after your first login.'
+        )
+        member.credentials_issued_at = timezone.now()
+        member.save(update_fields=['credentials_issued_at'])
+    return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 @api_view(['PATCH', 'DELETE'])
@@ -481,16 +514,24 @@ def merchant_settlements(request):
     return Response(MerchantSettlementSerializer(settlements[:100], many=True).data)
 
 
-@api_view(['GET', 'PATCH'])
+@api_view(['GET', 'PATCH', 'POST'])
 @authentication_classes([MerchantApiKeyAuthentication])
 @permission_classes([AllowAny])
 @throttle_classes([MerchantApiKeyRateThrottle])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def merchant_settings(request):
     merchant = _merchant_from_request(request)
-    if request.method == 'PATCH':
+    if request.method in ('PATCH', 'POST'):
         allowed = {'business_name', 'business_email', 'website_url', 'description',
                    'logo_url', 'contact_email', 'contact_phone', 'address', 'tax_id',
                    'webhook_url', 'webhook_events'}
+        uploaded_logo = request.FILES.get('logo')
+        if uploaded_logo:
+            merchant.logo = uploaded_logo
+            merchant.save(update_fields=['logo', 'updated_at'])
+        elif 'logo_url' in request.data:
+            return Response({'error': 'Use multipart field "logo" for logo uploads.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         unknown = set(request.data) - allowed
         if unknown:
             return Response({'error': f'Unsupported settings: {", ".join(sorted(unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
@@ -501,10 +542,67 @@ def merchant_settings(request):
         'business_name': merchant.business_name, 'business_email': merchant.business_email,
         'website_url': merchant.website_url, 'description': merchant.description,
         'logo_url': merchant.logo_url, 'contact_email': merchant.contact_email,
+        'logo': request.build_absolute_uri(merchant.logo.url) if merchant.logo else '',
         'contact_phone': merchant.contact_phone, 'address': merchant.address,
         'tax_id': merchant.tax_id, 'webhook_url': merchant.webhook_url,
         'webhook_events': merchant.webhook_events,
     })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def merchant_public_profile(request, identifier):
+    merchant = Merchant.objects.filter(
+        public_identifier=identifier, status=MerchantStatus.ACTIVE,
+    ).first()
+    if not merchant:
+        return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({
+        'public_identifier': merchant_public_identifier(merchant),
+        'business_name': merchant.business_name,
+        'description': merchant.description,
+        'website_url': merchant.website_url,
+        'logo': request.build_absolute_uri(merchant.logo.url) if merchant.logo else merchant.logo_url,
+        'contact_email': merchant.contact_email,
+    })
+
+
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, SignedTokenAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_payment_prompt(request, identifier):
+    """Create a normal wallet payment request so app approval/realtime flows remain intact."""
+    merchant = Merchant.objects.filter(public_identifier=identifier, status=MerchantStatus.ACTIVE).first()
+    if not merchant:
+        return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
+    from wallet.models import WalletStatus, PaymentRequestStatus
+    payer = request.user
+    if not hasattr(payer, 'wallet') or payer.wallet.status != WalletStatus.ACTIVE:
+        return Response({'error': 'Your wallet is not active'}, status=status.HTTP_403_FORBIDDEN)
+    if payer.id == merchant.user_id:
+        return Response({'error': 'A merchant cannot pay itself'}, status=status.HTTP_400_BAD_REQUEST)
+    amount = request.data.get('amount')
+    try:
+        from decimal import Decimal
+        amount = Decimal(str(amount))
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError, ArithmeticError):
+        return Response({'error': 'A positive amount is required'}, status=status.HTTP_400_BAD_REQUEST)
+    payment_request = PaymentRequest.objects.create(
+        requester=merchant.user, payer=payer, amount=amount,
+        currency=(request.data.get('currency') or payer.wallet.currency).upper(),
+        note=request.data.get('note', ''), status=PaymentRequestStatus.PENDING,
+    )
+    approval = __import__('wallet.services.webhooks', fromlist=['create_payment_request_approval']).create_payment_request_approval(payment_request)
+    notification = create_notification_record(payer, 'payment_request_received', {
+        'approval_id': approval.id, 'requester_display_name': merchant.business_name,
+        'amount': str(amount), 'currency': payment_request.currency,
+        'note': payment_request.note, 'payment_request_id': payment_request.id,
+    })
+    deliver_notification(notification.id)
+    return Response({'payment_request_id': payment_request.id, 'status': payment_request.status,
+                     'merchant': merchant.business_name}, status=status.HTTP_201_CREATED)
 
 
 def _merchant_dispute_queryset(merchant, mode):

@@ -1,9 +1,25 @@
 import secrets
+import re
 
 from django.contrib.auth.hashers import make_password
 from django.db import transaction
 
 from wallet.models import Merchant, MerchantApiKey, MerchantMode, MerchantStatus, User, Wallet, WalletStatus
+
+
+def merchant_public_identifier(merchant):
+    """Return a stable, non-secret identifier suitable for QR/public links."""
+    if merchant.public_identifier:
+        return merchant.public_identifier
+    base = re.sub(r'[^a-z0-9]+', '-', merchant.business_name.lower()).strip('-') or 'merchant'
+    candidate = base
+    suffix = 2
+    while Merchant.objects.filter(public_identifier=candidate).exclude(pk=merchant.pk).exists():
+        candidate = f'{base}-{suffix}'
+        suffix += 1
+    merchant.public_identifier = candidate[:80]
+    merchant.save(update_fields=['public_identifier', 'updated_at'])
+    return candidate
 
 
 def _key_prefix(mode):
@@ -21,6 +37,8 @@ def generate_merchant_api_keys(merchant, mode):
     secret_key_prefix = secret_key[:20]
 
     with transaction.atomic():
+        if MerchantApiKey.objects.filter(merchant=merchant, mode=mode, is_active=True).exists():
+            raise ValueError('Credentials have already been issued for this environment.')
         MerchantApiKey.objects.update_or_create(
             merchant=merchant,
             mode=mode,

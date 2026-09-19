@@ -13,7 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.http import HttpResponse
 from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 import requests
 from google.oauth2 import id_token
@@ -5289,7 +5289,8 @@ def create_merchant_account(request):
                 tax_id=tax_id,
                 status=MerchantStatus.PENDING
             )
-            from .services.merchants import ensure_sandbox_wallet, generate_merchant_api_keys
+            merchant_public_identifier(merchant)
+            from .services.merchants import ensure_sandbox_wallet, generate_merchant_api_keys, merchant_public_identifier
             ensure_sandbox_wallet(merchant)
             sandbox_public, sandbox_secret = generate_merchant_api_keys(merchant, MerchantMode.SANDBOX)
             merchant.sandbox_public_key = sandbox_public
@@ -5330,6 +5331,7 @@ def create_merchant_account(request):
 )
 @api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
 def get_merchant_account(request):
     """
     Get the current user's merchant account.
@@ -5337,13 +5339,22 @@ def get_merchant_account(request):
     try:
         merchant = Merchant.objects.get(user=request.user)
         if request.method == 'PATCH':
-            allowed_fields = ['business_name', 'business_email', 'website_url', 'business_type', 'description', 'logo_url', 'contact_email', 'contact_phone', 'address', 'tax_id']
+            allowed_fields = ['business_name', 'business_email', 'website_url', 'business_type', 'description', 'contact_email', 'contact_phone', 'address', 'tax_id']
             for field in allowed_fields:
                 if field in request.data:
                     setattr(merchant, field, request.data[field])
-            merchant.save(update_fields=[field for field in allowed_fields if field in request.data] + ['updated_at'])
+            update_fields = [field for field in allowed_fields if field in request.data]
+            uploaded_logo = request.FILES.get('logo')
+            if uploaded_logo:
+                merchant.logo = uploaded_logo
+                update_fields.append('logo')
+            elif 'logo_url' in request.data:
+                return Response({'error': 'Use multipart field "logo" for logo uploads.'}, status=status.HTTP_400_BAD_REQUEST)
+            merchant.save(update_fields=update_fields + ['updated_at'])
+        payload = MerchantSerializer(merchant).data
+        payload['logo'] = request.build_absolute_uri(merchant.logo.url) if merchant.logo else ''
         return Response(
-            MerchantSerializer(merchant).data,
+            payload,
             status=status.HTTP_200_OK
         )
     except Merchant.DoesNotExist:
@@ -5560,7 +5571,10 @@ def merchant_credentials(request):
     if environment == 'live' and merchant.status != MerchantStatus.ACTIVE:
         return Response({'error': 'Live credentials require an approved merchant account'}, status=status.HTTP_403_FORBIDDEN)
     mode = MerchantMode.LIVE if environment == 'live' else MerchantMode.SANDBOX
-    public_key, secret_key = generate_merchant_api_keys(merchant, mode)
+    try:
+        public_key, secret_key = generate_merchant_api_keys(merchant, mode)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
     merchant.credentials_issued_at = timezone.now()
     merchant.save(update_fields=['credentials_issued_at'])
     return Response({'environment': environment, 'public_key': public_key, 'secret_key': secret_key})
