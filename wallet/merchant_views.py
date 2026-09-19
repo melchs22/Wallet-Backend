@@ -11,6 +11,7 @@ from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from django.http import StreamingHttpResponse
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework.response import Response
 
 from wallet.merchant_authentication import MerchantApiKeyAuthentication, MerchantApiKeyRateThrottle
@@ -32,6 +33,7 @@ from wallet.models import (
 )
 from wallet.services.limits import merchant_limit_snapshot
 from wallet.services.fees import preview_merchant_transfer_fee, resolve_fee
+from wallet.services.security import send_multiwa_text
 from wallet.services.payment_intents import (
     PaymentIntentError,
     cancel_payment_intent,
@@ -41,6 +43,7 @@ from wallet.services.payment_intents import (
 )
 from wallet.services.merchants import merchant_public_identifier
 from wallet.services.notifications import create_notification_record, deliver_notification
+from wallet.services.phone import phone_lookup_values
 from wallet.models import FeeAppliesTo
 
 logger = logging.getLogger(__name__)
@@ -104,6 +107,7 @@ def merchant_team(request):
         }]
         result.extend({
             'id': member.id, 'email': member.email, 'user_id': member.user_id,
+            'full_name': member.full_name, 'phone_number': member.phone_number,
             'role': member.role, 'is_active': member.is_active,
             'invited_at': member.invited_at, 'accepted_at': member.accepted_at,
         } for member in members)
@@ -111,9 +115,15 @@ def merchant_team(request):
     if not _team_can(role, 'invite'):
         raise exceptions.PermissionDenied()
     email = (request.data.get('email') or '').strip().lower()
+    full_name = (request.data.get('full_name') or '').strip()
+    phone_number = (request.data.get('phone_number') or '').strip()
     member_role = request.data.get('role', MerchantTeamRole.SUPPORT)
     if not email or '@' not in email:
         return Response({'error': 'A valid email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not full_name:
+        return Response({'error': 'The invitee name is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not phone_number:
+        return Response({'error': 'The invitee phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
     if member_role == MerchantTeamRole.OWNER or member_role not in MerchantTeamRole.values:
         return Response({'error': 'Invalid team role.'}, status=status.HTTP_400_BAD_REQUEST)
     from wallet.models import User
@@ -130,17 +140,31 @@ def merchant_team(request):
             suffix += 1
         user = User.objects.create_user(
             email=email, password=temporary_password, handle=handle,
-            display_name=local_part, must_change_password=True,
+            display_name=full_name, primary_phone_number=phone_number, must_change_password=True,
         )
+    else:
+        user.display_name = full_name
+        if phone_number and not user.primary_phone_number:
+            user.primary_phone_number = phone_number
+            user.save(update_fields=['display_name', 'primary_phone_number'])
     member, created = MerchantTeamMember.objects.update_or_create(
         merchant=merchant, email=email,
-        defaults={'user': user, 'role': member_role, 'is_active': True, 'invited_by': request.user},
+        defaults={'user': user, 'full_name': full_name, 'phone_number': phone_number,
+                  'role': member_role, 'is_active': True, 'invited_by': request.user},
     )
-    payload = {'id': member.id, 'email': member.email, 'user_id': member.user_id, 'role': member.role,
-               'is_active': member.is_active, 'invitation': {
+    payload = {'id': member.id, 'email': member.email, 'user_id': member.user_id,
+               'full_name': member.full_name, 'phone_number': member.phone_number,
+               'role': member.role,
+               'is_active': member.is_active, 'accepted_at': member.accepted_at,
+               'invitation': {
                    'email': email, 'role': member.role,
                    'login_url': request.build_absolute_uri('/api/auth/login'),
-                   'whatsapp_text': f'You have been invited to join {merchant.business_name} as {member.role}.',
+                   'whatsapp_text': (
+                       f'Hello {member.full_name}, you have been invited to join '
+                       f'{merchant.business_name} as {member.role}. '
+                       f'Login email: {email}. '
+                       f'Login here: {request.build_absolute_uri("/login")}.'
+                   ),
                }}
     if temporary_password:
         payload['invitation']['temporary_password'] = temporary_password
@@ -150,6 +174,21 @@ def merchant_team(request):
         )
         member.credentials_issued_at = timezone.now()
         member.save(update_fields=['credentials_issued_at'])
+    delivery = send_multiwa_text(
+        phone_number,
+        payload['invitation']['whatsapp_text'],
+        log_context={'merchant_id': merchant.id, 'team_member_id': member.id},
+    )
+    payload['invitation']['delivery_status'] = delivery.get('status')
+    if delivery.get('status') != 'sent':
+        return Response(
+            {
+                'error': 'The team member was saved, but we could not send the invitation message.',
+                'member': payload,
+                'delivery_status': delivery.get('status'),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
@@ -176,7 +215,9 @@ def merchant_team_member(request, member_id):
     member.role = new_role
     member.save(update_fields=['role'])
     return Response({'id': member.id, 'email': member.email, 'user_id': member.user_id,
-                     'role': member.role, 'is_active': member.is_active})
+                     'full_name': member.full_name, 'phone_number': member.phone_number,
+                     'role': member.role, 'is_active': member.is_active,
+                     'accepted_at': member.accepted_at})
 
 
 @api_view(['POST'])
@@ -568,15 +609,23 @@ def merchant_public_profile(request, identifier):
 
 
 @api_view(['POST'])
-@authentication_classes([SessionAuthentication, SignedTokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def merchant_payment_prompt(request, identifier):
     """Create a normal wallet payment request so app approval/realtime flows remain intact."""
     merchant = Merchant.objects.filter(public_identifier=identifier, status=MerchantStatus.ACTIVE).first()
     if not merchant:
         return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
-    from wallet.models import WalletStatus, PaymentRequestStatus
-    payer = request.user
+    from wallet.models import User, WalletStatus, PaymentRequestStatus
+    payer_phone = str(request.data.get('payer_phone') or '').strip()
+    if not payer_phone:
+        return Response({'error': 'Enter the phone number linked to the DSD PAY app.'}, status=status.HTTP_400_BAD_REQUEST)
+    phone_values = phone_lookup_values(payer_phone)
+    payer = User.objects.filter(
+        Q(primary_phone_number__in=phone_values) | Q(phone_number__in=phone_values),
+        status='active',
+    ).first()
+    if not payer:
+        return Response({'error': 'No active DSD PAY account was found for that phone number.'}, status=status.HTTP_404_NOT_FOUND)
     if not hasattr(payer, 'wallet') or payer.wallet.status != WalletStatus.ACTIVE:
         return Response({'error': 'Your wallet is not active'}, status=status.HTTP_403_FORBIDDEN)
     if payer.id == merchant.user_id:

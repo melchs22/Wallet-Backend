@@ -1122,6 +1122,8 @@ class MerchantTeamMember(models.Model):
     merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='team_members')
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='merchant_team_memberships')
     email = models.EmailField()
+    full_name = models.CharField(max_length=255, blank=True, default='')
+    phone_number = models.CharField(max_length=30, blank=True, default='')
     role = models.CharField(max_length=20, choices=MerchantTeamRole.choices, default=MerchantTeamRole.SUPPORT)
     is_active = models.BooleanField(default=True)
     invited_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='sent_merchant_invitations')

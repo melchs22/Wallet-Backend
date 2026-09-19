@@ -28,7 +28,7 @@ from .models import (
     User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent, AppUpdatePolicy,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus, MerchantMode,
-    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule, TransactionApproval,
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule, TransactionApproval, MerchantTeamMember,
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
@@ -345,6 +345,10 @@ class EmailLoginView(APIView):
 
         if user.status != UserStatus.ACTIVE:
             return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
+
+        MerchantTeamMember.objects.filter(
+            user=user, is_active=True, accepted_at__isnull=True,
+        ).update(accepted_at=timezone.now())
 
         # Merchant workspaces always require a one-time SMS code after the
         # password is accepted. No session or access token is issued yet.

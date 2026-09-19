@@ -252,8 +252,8 @@ def send_otp_push(challenge, code):
     return {'status': 'sent', 'success_count': response.success_count, 'failure_count': response.failure_count}
 
 
-def send_otp_sms(challenge, code):
-    """Deliver a merchant login code through the configured Multiwa gateway."""
+def send_multiwa_text(phone, text, *, log_context=None):
+    """Deliver a text message through the configured Multiwa gateway."""
     api_key = os.getenv('MULTIWA_API_KEY', '').strip()
     profile_id = os.getenv(
         'MULTIWA_PROFILE_ID',
@@ -263,9 +263,9 @@ def send_otp_sms(challenge, code):
         logger.error('multiwa_sms_not_configured')
         return {'status': 'not_configured'}
 
-    phone = (challenge.user.primary_phone_number or challenge.user.phone_number or '').strip()
+    phone = (phone or '').strip()
     if not phone:
-        logger.error('merchant_otp_phone_missing', extra={'user_id': challenge.user_id})
+        logger.error('multiwa_phone_missing', extra=log_context or {})
         return {'status': 'phone_missing'}
 
     base_url = os.getenv(
@@ -278,13 +278,23 @@ def send_otp_sms(challenge, code):
             json={
                 'profileId': profile_id,
                 'to': phone,
-                'text': f'DSD PAY login code: {code}. It expires in 5 minutes. Do not share this code.',
+                'text': text,
             },
             headers={'Content-Type': 'application/json', 'X-API-Key': api_key},
             timeout=10,
         )
         response.raise_for_status()
     except requests.RequestException:
-        logger.exception('multiwa_sms_delivery_failed', extra={'user_id': challenge.user_id})
+        logger.exception('multiwa_sms_delivery_failed', extra=log_context or {})
         return {'status': 'delivery_failed'}
     return {'status': 'sent'}
+
+
+def send_otp_sms(challenge, code):
+    """Deliver a merchant login code through the configured Multiwa gateway."""
+    phone = challenge.user.primary_phone_number or challenge.user.phone_number
+    return send_multiwa_text(
+        phone,
+        f'DSD PAY login code: {code}. It expires in 5 minutes. Do not share this code.',
+        log_context={'user_id': challenge.user_id},
+    )
