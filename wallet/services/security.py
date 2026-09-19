@@ -293,8 +293,12 @@ def send_multiwa_text(phone, text, *, log_context=None):
 def send_otp_sms(challenge, code):
     """Deliver a merchant login code through the configured Multiwa gateway."""
     phone = challenge.user.primary_phone_number or challenge.user.phone_number
+    app_hash = os.getenv('MULTIWA_ANDROID_APP_HASH', '').strip()
+    message = f'DSD PAY login code: {code}. It expires in 5 minutes. Do not share this code.'
+    if app_hash:
+        message = f'<#> {message} {app_hash}'
     return send_multiwa_text(
         phone,
-        f'DSD PAY login code: {code}. It expires in 5 minutes. Do not share this code.',
+        message,
         log_context={'user_id': challenge.user_id},
     )
