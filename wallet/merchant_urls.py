@@ -5,6 +5,7 @@ from . import merchant_views
 urlpatterns = [
     path('public/<slug:identifier>', merchant_views.merchant_public_profile, name='merchant_public_profile'),
     path('public/<slug:identifier>/payment-prompt', merchant_views.merchant_payment_prompt, name='merchant_payment_prompt'),
+    path('public/<slug:identifier>/payment-prompt/<int:payment_request_id>/status', merchant_views.merchant_payment_prompt_status, name='merchant_payment_prompt_status'),
     path('payment-intents', merchant_views.merchant_create_payment_intent, name='merchant_create_payment_intent'),
     path('limits', merchant_views.merchant_limits, name='merchant_limits'),
     path('payment-intents/<int:intent_id>', merchant_views.merchant_get_payment_intent, name='merchant_get_payment_intent'),

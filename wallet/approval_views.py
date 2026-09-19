@@ -191,6 +191,7 @@ def approve_transaction(request, approval_id):
             payment_request.status = PaymentRequestStatus.PAID
             payment_request.resulting_transaction = transaction_obj
             payment_request.save(update_fields=['status', 'resulting_transaction'])
+            approval.transaction = transaction_obj
         elif approval.split_request:
             participant = SplitParticipant.objects.select_related('payment_request').filter(
                 split_request=approval.split_request,
@@ -210,6 +211,7 @@ def approve_transaction(request, approval_id):
             participant.payment_request.status = PaymentRequestStatus.PAID
             participant.payment_request.resulting_transaction = transaction_obj
             participant.payment_request.save(update_fields=['status', 'resulting_transaction'])
+            approval.transaction = transaction_obj
         else:
             transaction_obj = execute_p2p_transfer(
                 sender=approval.requester,

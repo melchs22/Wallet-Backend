@@ -153,10 +153,22 @@ def execute_p2p_transfer(
             'note': note,
         },
     )
+    sender_notification = create_notification_record(
+        sender,
+        'payment_sent',
+        {
+            'transaction_id': str(transaction_obj.id),
+            'recipient_handle': recipient.handle,
+            'amount': str(amount),
+            'currency': currency,
+            'note': note,
+        },
+    )
 
     try:
         from wallet.tasks import send_notification_task
         send_notification_task.delay(notification.id)
+        send_notification_task.delay(sender_notification.id)
     except Exception:
         logger.exception('scheduled_transfer_notification_dispatch_failed')
 

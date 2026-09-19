@@ -11,6 +11,7 @@ from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from django.http import StreamingHttpResponse
 from django.utils import timezone
+from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db.models import Q
 from rest_framework.response import Response
 
@@ -389,9 +390,10 @@ def admin_merchant_webhook_deliveries(request, merchant_id):
 
 
 def _merchant_transactions(merchant, mode):
+    from django.db.models import Q
     return Transaction.objects.filter(
-        payment_intents__merchant=merchant,
-        payment_intents__mode=mode,
+        Q(payment_intents__merchant=merchant, payment_intents__mode=mode)
+        | Q(recipient=merchant.user),
     ).distinct().select_related('sender', 'recipient').prefetch_related('payment_intents')
 
 
@@ -650,8 +652,45 @@ def merchant_payment_prompt(request, identifier):
         'note': payment_request.note, 'payment_request_id': payment_request.id,
     })
     deliver_notification(notification.id)
+    status_token = TimestampSigner(salt='merchant-payment-status').sign(
+        f'{merchant.id}:{payment_request.id}'
+    )
     return Response({'payment_request_id': payment_request.id, 'status': payment_request.status,
-                     'merchant': merchant.business_name}, status=status.HTTP_201_CREATED)
+                     'merchant': merchant.business_name, 'status_token': status_token},
+                    status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def merchant_payment_prompt_status(request, identifier, payment_request_id):
+    """Return the public completion state for one payment-link request."""
+    merchant = Merchant.objects.filter(
+        public_identifier=identifier, status=MerchantStatus.ACTIVE
+    ).first()
+    if not merchant:
+        return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
+    token = str(request.query_params.get('token') or '')
+    try:
+        signed_merchant_id, signed_request_id = TimestampSigner(
+            salt='merchant-payment-status'
+        ).unsign(token, max_age=60 * 30).split(':', 1)
+    except (BadSignature, SignatureExpired, ValueError):
+        return Response({'error': 'Payment status token is invalid or expired'}, status=status.HTTP_400_BAD_REQUEST)
+    if signed_merchant_id != str(merchant.id) or signed_request_id != str(payment_request_id):
+        return Response({'error': 'Payment status token is invalid'}, status=status.HTTP_403_FORBIDDEN)
+    payment_request = PaymentRequest.objects.filter(
+        id=payment_request_id, requester=merchant.user
+    ).select_related('resulting_transaction').first()
+    if not payment_request:
+        return Response({'error': 'Payment request not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({
+        'payment_request_id': payment_request.id,
+        'status': payment_request.status,
+        'transaction_id': str(payment_request.resulting_transaction_id)
+        if payment_request.resulting_transaction_id else None,
+        'amount': str(payment_request.amount),
+        'currency': payment_request.currency,
+    })
 
 
 def _merchant_dispute_queryset(merchant, mode):
