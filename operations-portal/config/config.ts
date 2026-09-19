@@ -31,7 +31,7 @@ const commitHash =
  * @description 部署时的路径，如果部署在非根目录下，需要配置这个变量
  * @doc https://umijs.org/docs/api/config#publicpath
  */
-const PUBLIC_PATH: string = '/';
+const PUBLIC_PATH: string = process.env.OPERATIONS_PUBLIC_PATH || '/';
 
 export default defineConfig({
   alias: {
@@ -45,6 +45,7 @@ export default defineConfig({
   hash: true,
 
   publicPath: PUBLIC_PATH,
+  base: PUBLIC_PATH === '/' ? '/' : PUBLIC_PATH.replace(/\/$/, ''),
 
   /**
    * @name 兼容性设置
