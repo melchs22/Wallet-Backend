@@ -47,7 +47,8 @@ from .serializers import (
     MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer,
     MerchantPlanSerializer, MerchantSubscriptionSerializer, ChangePasswordSerializer,
     SupportedCountrySerializer, LegalDocumentSerializer, ProviderCatalogSerializer,
-    UserKYCSubmissionSerializer, OtpChallengeRequestSerializer, OtpChallengeVerifySerializer, LoginConfirmationSerializer
+    UserKYCSubmissionSerializer, OtpChallengeRequestSerializer, OtpChallengeVerifySerializer,
+    MerchantLoginOtpVerifySerializer, LoginConfirmationSerializer
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -67,6 +68,7 @@ from .services.security import (
     verify_device_signature,
     token_is_step_up_verified,
     valid_webhook_signature,
+    send_otp_sms,
 )
 
 # Configure structured JSON logging
@@ -344,6 +346,39 @@ class EmailLoginView(APIView):
         if user.status != UserStatus.ACTIVE:
             return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
 
+        # Merchant workspaces always require a one-time SMS code after the
+        # password is accepted. No session or access token is issued yet.
+        if hasattr(user, 'merchant_account'):
+            if not (user.primary_phone_number or user.phone_number):
+                return Response(
+                    {'error': 'A verified phone number is required to access the merchant portal.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            challenge, code = create_otp_challenge(
+                user,
+                OtpChallenge.Purpose.LOGIN,
+                request,
+                device_id=device_id,
+                device_name=serializer.validated_data.get('device_name', ''),
+            )
+            delivery = send_otp_sms(challenge, code)
+            if delivery.get('status') != 'sent':
+                challenge.consumed_at = timezone.now()
+                challenge.save(update_fields=['consumed_at'])
+                return Response(
+                    {'error': 'We could not send your login code. Please try again later.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            return Response(
+                {
+                    'status': 'otp_required',
+                    'challenge_id': str(challenge.request_id),
+                    'expires_in': 300,
+                    'destination': (user.primary_phone_number or user.phone_number)[-4:],
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
         device = TrustedDevice.objects.filter(
             user=user, device_id=device_id, is_trusted=True, revoked_at__isnull=True,
         ).first() if device_id else None
@@ -448,6 +483,60 @@ class EmailLoginView(APIView):
             'is_new_user': False,
         }
         request.session.save()
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+@extend_schema(
+    request=MerchantLoginOtpVerifySerializer,
+    responses={200: dict, 400: dict, 401: dict},
+    tags=['Authentication'],
+)
+class MerchantLoginOtpVerifyView(APIView):
+    permission_classes = [AllowAny]
+    serializer_class = MerchantLoginOtpVerifySerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            challenge = OtpChallenge.objects.select_related('user', 'device').get(
+                request_id=serializer.validated_data['challenge_id'],
+                purpose=OtpChallenge.Purpose.LOGIN,
+            )
+        except OtpChallenge.DoesNotExist:
+            return Response({'error': 'Invalid or expired login challenge.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = challenge.user
+        if not hasattr(user, 'merchant_account') or user.status != UserStatus.ACTIVE:
+            return Response({'error': 'This login challenge is no longer valid.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        from .services.security import verify_otp_challenge
+        verified, error = verify_otp_challenge(challenge, serializer.validated_data['code'])
+        if not verified:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+
+        login(request, user)
+        wallet = getattr(user, 'wallet', None)
+        if wallet is None:
+            wallet = Wallet.objects.create(user=user, currency='GNF')
+            LedgerEntry.objects.create(
+                wallet=wallet,
+                transaction=None,
+                direction=LedgerDirection.CREDIT,
+                amount=Decimal('0.00'),
+            )
+        device_id = challenge.device.device_id if challenge.device else None
+        response_data = {
+            'user': UserSerializer(user).data,
+            'wallet': WalletSerializer(wallet).data,
+            'access_token': issue_access_token(user, device_id=device_id),
+            'is_new_user': False,
+        }
+        request.session.save()
+        AuditLog.objects.create(user=user, action='login', metadata={'method': 'merchant_sms_otp'})
         return Response(response_data, status=status.HTTP_200_OK)
 
 

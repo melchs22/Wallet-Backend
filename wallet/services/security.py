@@ -4,6 +4,8 @@ import json
 import os
 import secrets
 import base64
+import logging
+import requests
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, padding
@@ -21,6 +23,7 @@ from wallet.models import AuditLog, OtpChallenge, TrustedDevice
 
 OTP_TTL = timedelta(minutes=5)
 STEP_UP_TTL = timedelta(minutes=10)
+logger = logging.getLogger(__name__)
 
 
 def device_id_from_request(request):
@@ -247,3 +250,41 @@ def send_otp_push(challenge, code):
     )
     response = messaging.send_each_for_multicast(message)
     return {'status': 'sent', 'success_count': response.success_count, 'failure_count': response.failure_count}
+
+
+def send_otp_sms(challenge, code):
+    """Deliver a merchant login code through the configured Multiwa gateway."""
+    api_key = os.getenv('MULTIWA_API_KEY', '').strip()
+    profile_id = os.getenv(
+        'MULTIWA_PROFILE_ID',
+        '24a50869-40c9-4498-ac97-df123e899619',
+    ).strip()
+    if not api_key or not profile_id:
+        logger.error('multiwa_sms_not_configured')
+        return {'status': 'not_configured'}
+
+    phone = (challenge.user.primary_phone_number or challenge.user.phone_number or '').strip()
+    if not phone:
+        logger.error('merchant_otp_phone_missing', extra={'user_id': challenge.user_id})
+        return {'status': 'phone_missing'}
+
+    base_url = os.getenv(
+        'MULTIWA_BASE_URL',
+        'https://duuka.transportunion.ug/multiwa-api/api/v1',
+    ).rstrip('/')
+    try:
+        response = requests.post(
+            f'{base_url}/messages/text',
+            json={
+                'profileId': profile_id,
+                'to': phone,
+                'text': f'DSD PAY login code: {code}. It expires in 5 minutes. Do not share this code.',
+            },
+            headers={'Content-Type': 'application/json', 'X-API-Key': api_key},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        logger.exception('multiwa_sms_delivery_failed', extra={'user_id': challenge.user_id})
+        return {'status': 'delivery_failed'}
+    return {'status': 'sent'}

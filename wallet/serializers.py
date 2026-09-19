@@ -105,6 +105,11 @@ class OtpChallengeVerifySerializer(serializers.Serializer):
     code = serializers.RegexField(regex=r'^\d{6}$')
 
 
+class MerchantLoginOtpVerifySerializer(serializers.Serializer):
+    challenge_id = serializers.UUIDField()
+    code = serializers.RegexField(regex=r'^\d{6}$')
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True, min_length=8)

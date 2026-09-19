@@ -1,6 +1,6 @@
 from django.urls import path, include
 from .views import (
-    EmailSignupView, EmailLoginView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView, resolve_user_by_phone,
+    EmailSignupView, EmailLoginView, MerchantLoginOtpVerifyView, GoogleAuthView, csrf_cookie_view, logout_view, MeView, UserResolveView, resolve_user_by_phone,
     TransferView, TransferPreviewView, NotificationListView, NotificationDetailView, PushDeviceView, OtpChallengeRequestView, OtpChallengeVerifyView,
     WalletView, TransactionListView, CloseAccountView,
     TransactionDetailView, ReversalView, AdminLoginView,
@@ -40,6 +40,7 @@ urlpatterns = [
     path('auth/google', GoogleAuthView.as_view(), name='google_auth'),
     path('auth/signup', EmailSignupView.as_view(), name='email_signup'),
     path('auth/login', EmailLoginView.as_view(), name='email_login'),
+    path('auth/login/otp', MerchantLoginOtpVerifyView.as_view(), name='merchant_login_otp'),
     path('auth/change-password', change_password, name='change_password'),
     path('countries', supported_countries, name='supported_countries'),
     path('app/update-status', app_update_status, name='app_update_status'),
