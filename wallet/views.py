@@ -5627,6 +5627,12 @@ def merchant_dashboard(request):
     today_completed = completed.filter(created_at__gte=today)
     attempted_today = transactions.filter(created_at__gte=today)
     volume = today_completed.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    merchant_fees = completed.aggregate(total=Sum('merchant_fee_amount'))['total'] or Decimal('0.00')
+    gross_received = completed.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    net_received = gross_received - merchant_fees
+    pending_settlements = merchant.settlements.filter(
+        status__in=[Settlement.Status.PENDING, Settlement.Status.PROCESSING],
+    ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
     success_rate = (
         today_completed.count() * 100 / attempted_today.count()
         if attempted_today.exists() else 0
@@ -5634,12 +5640,23 @@ def merchant_dashboard(request):
     recent = completed.order_by('-created_at')[:10]
     return Response({'merchant': MerchantSerializer(merchant).data, 'today_volume': str(volume),
                      'success_rate': round(success_rate, 2),
-                     'transaction_count': completed.count(), 'pending_settlements': '0.00',
+                     'transaction_count': completed.count(),
+                     'gross_received': str(gross_received),
+                     'merchant_fees': str(merchant_fees),
+                     'net_received': str(net_received),
+                     'pending_settlements': str(pending_settlements),
                      'available_balance': str(merchant.wallet.get_balance()),
                      'plan_usage': merchant_monthly_usage(merchant),
-                     'transactions': list(recent.values('id', 'amount', 'currency', 'note', 'status', 'created_at')),
+                     'transactions': list(recent.values(
+                         'id', 'amount', 'fee_amount', 'merchant_fee_amount', 'currency',
+                         'note', 'status', 'created_at', 'sender_id', 'sender__handle',
+                         'sender__display_name',
+                     )),
                      'kyc_documents': list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')),
-                     'settlements': list(merchant.settlements.values('id', 'amount', 'fees', 'currency', 'batch_reference', 'status', 'destination', 'created_at'))})
+                     'settlements': list(merchant.settlements.values(
+                         'id', 'amount', 'fees', 'currency', 'batch_reference', 'status',
+                         'destination', 'created_at', 'completed_at',
+                     ))})
 
 
 @api_view(['GET', 'POST'])

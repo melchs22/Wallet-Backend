@@ -120,13 +120,18 @@ class MerchantTransactionSerializer(serializers.ModelSerializer):
 
 
 class MerchantSettlementSerializer(serializers.ModelSerializer):
+    net_amount = serializers.SerializerMethodField()
+
     class Meta:
         model = Settlement
         fields = [
-            'id', 'amount', 'fees', 'currency', 'batch_reference', 'status',
+            'id', 'amount', 'fees', 'net_amount', 'currency', 'batch_reference', 'status',
             'destination', 'created_at', 'completed_at',
         ]
         read_only_fields = fields
+
+    def get_net_amount(self, obj):
+        return str(obj.amount - obj.fees)
 
 
 class MerchantDisputeSerializer(serializers.ModelSerializer):
