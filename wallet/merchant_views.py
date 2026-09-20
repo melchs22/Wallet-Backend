@@ -524,9 +524,12 @@ def merchant_transactions(request):
         response = StreamingHttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="merchant-transactions.csv"'
         writer = csv.writer(response)
-        writer.writerow(['id', 'type', 'status', 'amount', 'fee_amount', 'currency', 'created_at'])
+        writer.writerow(['id', 'type', 'status', 'amount', 'fee_amount', 'merchant_fee_amount', 'currency', 'created_at'])
         for row in queryset[:5000]:
-            writer.writerow([row.id, row.type, row.status, row.amount, row.fee_amount, row.currency, row.created_at.isoformat()])
+            writer.writerow([
+                row.id, row.type, row.status, row.amount, row.fee_amount,
+                row.merchant_fee_amount, row.currency, row.created_at.isoformat(),
+            ])
         return response
     limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
     return Response(MerchantTransactionSerializer(queryset[:limit], many=True).data)

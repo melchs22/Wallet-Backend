@@ -6,6 +6,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
+from rest_framework.exceptions import APIException
 
 from wallet.models import (
     AuditLog,
@@ -27,10 +28,13 @@ from wallet.services.notifications import create_notification_record
 logger = logging.getLogger(__name__)
 
 
-class TransferExecutionError(Exception):
+class TransferExecutionError(APIException):
+    status_code = 400
+
     def __init__(self, reason, message):
         self.reason = reason
         self.message = message
+        self.detail = {'code': reason, 'error': message}
         super().__init__(message)
 
 
@@ -43,6 +47,8 @@ def execute_p2p_transfer(
     idempotency_key=None,
     *,
     skip_limit_checks=False,
+    merchant_fee_amount=Decimal('0.00'),
+    platform_wallet=None,
 ):
     """
     Atomic same-currency P2P transfer used by scheduled transfers and other background jobs.
@@ -57,6 +63,9 @@ def execute_p2p_transfer(
 
     from wallet.services.fees import calculate_transfer_fee
     fee_amount = calculate_transfer_fee(amount)
+    merchant_fee_amount = Decimal(merchant_fee_amount).quantize(Decimal('0.01'))
+    if merchant_fee_amount < 0:
+        raise TransferExecutionError('invalid_fee', 'Merchant fee cannot be negative')
 
     if sender.status != UserStatus.ACTIVE:
         raise TransferExecutionError('sender_account_suspended', 'Sender account is suspended')
@@ -101,6 +110,7 @@ def execute_p2p_transfer(
             amount=amount,
             currency=currency,
             fee_amount=fee_amount,
+            merchant_fee_amount=merchant_fee_amount,
             note=note,
             status=TransactionStatus.COMPLETED,
         )
@@ -122,8 +132,18 @@ def execute_p2p_transfer(
             wallet=recipient_wallet,
             transaction=transaction_obj,
             direction=LedgerDirection.CREDIT,
-            amount=amount,
+            amount=amount - merchant_fee_amount,
         )
+        if merchant_fee_amount > 0:
+            if platform_wallet is None:
+                raise TransferExecutionError('invalid_fee', 'Platform wallet is required for a merchant fee')
+            platform_wallet = Wallet.objects.select_for_update().get(pk=platform_wallet.pk)
+            LedgerEntry.objects.create(
+                wallet=platform_wallet,
+                transaction=transaction_obj,
+                direction=LedgerDirection.CREDIT,
+                amount=merchant_fee_amount,
+            )
 
         ProcessedRequest.objects.create(
             idempotency_key=idempotency_key,

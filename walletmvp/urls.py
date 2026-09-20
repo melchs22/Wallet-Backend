@@ -28,6 +28,7 @@ def health_check(request):
 
 urlpatterns = [
     path('', health_check, name='health_check'),
+    path('grappelli/', include('grappelli.urls')),
     path('admin/', admin.site.urls),
     path('api/', include('wallet.urls')),
     # API Schema endpoints

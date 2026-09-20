@@ -92,7 +92,8 @@ class MerchantTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transaction
         fields = [
-            'id', 'type', 'status', 'amount', 'fee_amount', 'currency', 'note',
+            'id', 'type', 'status', 'amount', 'fee_amount', 'merchant_fee_amount',
+            'currency', 'note',
             'sender', 'recipient', 'payment_intent_id', 'created_at',
         ]
         read_only_fields = fields
@@ -100,7 +101,12 @@ class MerchantTransactionSerializer(serializers.ModelSerializer):
     def _user(self, user):
         if not user:
             return None
-        return {'id': user.id, 'handle': user.handle, 'display_name': user.display_name}
+        return {
+            'id': user.id,
+            'handle': user.handle,
+            'display_name': user.display_name,
+            'primary_phone_number': user.primary_phone_number,
+        }
 
     def get_sender(self, obj):
         return self._user(obj.sender)

@@ -208,6 +208,7 @@ def confirm_payment_intent(intent, payer, idempotency_key):
         user=intent.merchant.user,
         currency=intent.currency,
     )
+    merchant_fee_amount = fee_amount
     total_debit = intent.amount + fee_amount
     platform_wallet = get_platform_wallet(intent.currency, is_sandbox=is_sandbox)
 
@@ -237,6 +238,8 @@ def confirm_payment_intent(intent, payer, idempotency_key):
             sender=payer,
             recipient=intent.merchant.user,
             amount=intent.amount,
+            fee_amount=fee_amount,
+            merchant_fee_amount=merchant_fee_amount,
             currency=intent.currency,
             note=intent.description or f'Payment to {intent.merchant.business_name}',
             status=TransactionStatus.COMPLETED,
@@ -252,7 +255,7 @@ def confirm_payment_intent(intent, payer, idempotency_key):
             wallet=merchant_wallet,
             transaction=transaction_obj,
             direction=LedgerDirection.CREDIT,
-            amount=intent.amount,
+            amount=intent.amount - merchant_fee_amount,
         )
         if fee_amount > 0:
             LedgerEntry.objects.create(
@@ -260,6 +263,13 @@ def confirm_payment_intent(intent, payer, idempotency_key):
                 transaction=transaction_obj,
                 direction=LedgerDirection.CREDIT,
                 amount=fee_amount,
+            )
+        if merchant_fee_amount > 0:
+            LedgerEntry.objects.create(
+                wallet=platform_wallet,
+                transaction=transaction_obj,
+                direction=LedgerDirection.CREDIT,
+                amount=merchant_fee_amount,
             )
 
         ProcessedRequest.objects.create(

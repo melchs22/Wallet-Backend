@@ -5,6 +5,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth.hashers import check_password, make_password
 from .models import PaymentRequestStatus, TransactionApproval, ParentalControl
+from .services.transfers import TransferExecutionError
 from .serializers import TransactionApprovalSerializer, PinVerifySerializer
 
 
@@ -69,6 +70,8 @@ def approve_transaction(request, approval_id):
         return Response({'error': 'Approval has expired'}, status=400)
     
     from .services.transfers import execute_p2p_transfer
+    from .services.fees import get_platform_wallet, resolve_fee
+    from .models import FeeAppliesTo
     from .models import SplitParticipant
 
     if approval.approval_type == 'money_sent':
@@ -187,6 +190,14 @@ def approve_transaction(request, approval_id):
                 currency=payment_request.currency,
                 note=payment_request.note or 'Payment for request',
                 idempotency_key=f'approval-{approval.id}',
+                merchant_fee_amount=resolve_fee(
+                    payment_request.amount,
+                    FeeAppliesTo.MERCHANT_TRANSFER,
+                    merchant=getattr(approval.requester, 'merchant_account', None),
+                    user=approval.requester,
+                    currency=payment_request.currency,
+                )[0],
+                platform_wallet=get_platform_wallet(payment_request.currency),
             )
             payment_request.status = PaymentRequestStatus.PAID
             payment_request.resulting_transaction = transaction_obj
@@ -207,6 +218,14 @@ def approve_transaction(request, approval_id):
                 currency=approval.currency,
                 note=approval.note,
                 idempotency_key=f'approval-{approval.id}',
+                merchant_fee_amount=resolve_fee(
+                    participant.amount_owed,
+                    FeeAppliesTo.MERCHANT_TRANSFER,
+                    merchant=getattr(approval.requester, 'merchant_account', None),
+                    user=approval.requester,
+                    currency=approval.currency,
+                )[0],
+                platform_wallet=get_platform_wallet(approval.currency),
             )
             participant.payment_request.status = PaymentRequestStatus.PAID
             participant.payment_request.resulting_transaction = transaction_obj

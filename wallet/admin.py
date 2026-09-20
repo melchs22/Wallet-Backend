@@ -10,7 +10,7 @@ from .models import (
     MobileMoneyTransaction, ScheduledTransfer, Merchant, TransactionApproval, ParentalControl,
     PushDevice, MerchantApiKey, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule,
     TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
-    SupportedCountry, LegalDocument, ProviderCatalog, TransferFeeRule, UserKYCSubmission, AppUpdatePolicy,
+    SupportedCountry, LegalDocument,     ProviderCatalog, TransferFeeRule, FeePolicy, UserKYCSubmission, AppUpdatePolicy,
     MerchantLimit, MerchantTeamMember,
 )
 
@@ -55,6 +55,37 @@ class ProviderCatalogAdmin(admin.ModelAdmin):
 class TransferFeeRuleAdmin(admin.ModelAdmin):
     list_display = ['min_amount', 'max_amount', 'fee_type', 'fee_value', 'active']
     list_filter = ['fee_type', 'active']
+    list_editable = ['fee_type', 'fee_value', 'active']
+    ordering = ['min_amount']
+
+
+@admin.register(FeePolicy)
+class FeePolicyAdmin(admin.ModelAdmin):
+    list_display = [
+        'name', 'applies_to', 'merchant', 'currency', 'fee_percent',
+        'fee_fixed', 'priority', 'is_active', 'created_at',
+    ]
+    list_filter = ['applies_to', 'currency', 'is_active']
+    search_fields = ['name', 'merchant__business_name', 'merchant__business_email']
+    list_editable = ['fee_percent', 'fee_fixed', 'priority', 'is_active']
+    autocomplete_fields = ['merchant']
+    readonly_fields = ['created_at']
+    fieldsets = [
+        ('Policy', {
+            'fields': (
+                'name', 'applies_to', 'merchant', 'currency', 'priority',
+                'is_active',
+            ),
+        }),
+        ('Charge', {
+            'description': (
+                'Set a percentage, a fixed amount, or both. Leave currency blank '
+                'to apply to every currency.'
+            ),
+            'fields': ('fee_percent', 'fee_fixed'),
+        }),
+        ('Audit', {'fields': ('created_at',)}),
+    ]
 
 
 @admin.register(UserKYCSubmission)
