@@ -1238,6 +1238,7 @@ def revoke_trusted_device(request, device_id):
         'type': 'device_revoked',
         'target_device_id': device_id,
         'device_id': device_id,
+        'created_at': timezone.now().isoformat(),
         'title': 'Device signed out',
         'message': 'This device was signed out remotely.',
     })
