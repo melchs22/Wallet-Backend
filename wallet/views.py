@@ -401,7 +401,11 @@ class EmailLoginView(APIView):
                 revoked_at__isnull=True,
             ).first()
             if device is not None:
-                device_id = device.device_id
+                if device_id and device.device_id != device_id:
+                    device.device_id = device_id
+                    device.save(update_fields=['device_id'])
+                else:
+                    device_id = device.device_id
         if device is None and trusted_exists:
             if not device_id or not public_key_pem:
                 return Response({'error': 'A device ID and public signing key are required for new-device login.'}, status=status.HTTP_400_BAD_REQUEST)
