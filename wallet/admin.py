@@ -11,7 +11,7 @@ from .models import (
     PushDevice, MerchantApiKey, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule,
     TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent,
     SupportedCountry, LegalDocument,     ProviderCatalog, TransferFeeRule, FeePolicy, UserKYCSubmission, AppUpdatePolicy,
-    MerchantLimit, MerchantTeamMember,
+    MerchantLimit, MerchantTeamMember, Bank, MerchantBankAccount, MerchantWithdrawal,
 )
 
 
@@ -549,6 +549,29 @@ class SettlementAdmin(admin.ModelAdmin):
     list_filter = ['status', 'currency', 'created_at']
     search_fields = ['batch_reference', 'merchant__business_name', 'merchant__user__email']
     readonly_fields = ['created_at']
+
+
+@admin.register(Bank)
+class BankAdmin(admin.ModelAdmin):
+    list_display = ['name', 'code', 'country_code', 'currency', 'is_active']
+    list_filter = ['country_code', 'currency', 'is_active']
+    search_fields = ['name', 'code']
+
+
+@admin.register(MerchantBankAccount)
+class MerchantBankAccountAdmin(admin.ModelAdmin):
+    list_display = ['merchant', 'bank', 'account_name', 'account_number', 'is_verified', 'is_default', 'created_at']
+    list_filter = ['is_verified', 'is_default', 'bank']
+    search_fields = ['merchant__business_name', 'account_name', 'account_number']
+    readonly_fields = ['created_at']
+
+
+@admin.register(MerchantWithdrawal)
+class MerchantWithdrawalAdmin(admin.ModelAdmin):
+    list_display = ['reference', 'merchant', 'amount', 'fee_amount', 'currency', 'status', 'created_at', 'completed_at']
+    list_filter = ['status', 'currency', 'created_at']
+    search_fields = ['reference', 'merchant__business_name', 'bank_account__account_number']
+    readonly_fields = ['created_at', 'completed_at']
 
 
 @admin.register(MerchantPayoutSchedule)

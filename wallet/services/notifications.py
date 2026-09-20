@@ -43,6 +43,7 @@ def create_notification_record(user, notification_type, payload):
         'mobile_money_withdrawal': 'Transfer sent',
         'mobile_money_transaction_completed': 'Withdrawal completed',
         'mobile_money_transaction_failed': 'Withdrawal failed',
+        'merchant_withdrawal_completed': 'Merchant withdrawal completed',
     }.get(notification_type, 'DSD PAY'))
     payload.setdefault('message', _notification_message(notification_type, payload))
     return Notification.objects.create(
@@ -84,6 +85,8 @@ def _notification_message(notification_type, payload):
         return f'Your withdrawal of {amount} {currency} was completed.'
     if notification_type == 'mobile_money_transaction_failed':
         return f'Your withdrawal of {amount} {currency} failed.'
+    if notification_type == 'merchant_withdrawal_completed':
+        return f'Your bank withdrawal of {amount} {currency} was completed.'
     if notification_type == 'parental_link_approved':
         return f"{payload.get('child_display_name', 'Your child')} approved the parental link."
     if notification_type == 'parental_link_declined':
@@ -136,6 +139,8 @@ def _localized_notification_content(notification_type, payload, language_code):
         return ('Retrait terminé', f'Votre retrait de {amount} {currency} est terminé.')
     if notification_type == 'mobile_money_transaction_failed':
         return ('Échec du retrait', f'Votre retrait de {amount} {currency} a échoué.')
+    if notification_type == 'merchant_withdrawal_completed':
+        return ('Retrait bancaire terminé', f'Votre retrait bancaire de {amount} {currency} est terminé.')
     if notification_type == 'parental_link_approved':
         return ('Lien parental approuvé', f'{payload.get("child_display_name", "Votre enfant")} a approuvé le lien parental.')
     if notification_type == 'parental_link_declined':

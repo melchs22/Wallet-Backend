@@ -1332,6 +1332,56 @@ class Settlement(models.Model):
         ordering = ['-created_at']
 
 
+class Bank(models.Model):
+    name = models.CharField(max_length=120)
+    code = models.CharField(max_length=30, unique=True)
+    logo_url = models.URLField(blank=True, default='')
+    country_code = models.CharField(max_length=2, default='GN')
+    currency = models.CharField(max_length=3, default='GNF')
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class MerchantBankAccount(models.Model):
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='bank_accounts')
+    bank = models.ForeignKey(Bank, on_delete=models.PROTECT, related_name='merchant_accounts')
+    account_name = models.CharField(max_length=160)
+    account_number = models.CharField(max_length=80)
+    is_verified = models.BooleanField(default=False)
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-is_default', '-created_at']
+
+
+class MerchantWithdrawal(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='withdrawals')
+    bank_account = models.ForeignKey(MerchantBankAccount, on_delete=models.PROTECT, related_name='withdrawals')
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    fee_amount = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal('0.00'))
+    currency = models.CharField(max_length=3)
+    reference = models.CharField(max_length=100, unique=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    provider_response = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
 class MerchantPayoutSchedule(models.Model):
     class Frequency(models.TextChoices):
         DAILY = 'daily', 'Daily'

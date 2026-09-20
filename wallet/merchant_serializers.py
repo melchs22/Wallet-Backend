@@ -3,7 +3,8 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from wallet.models import (
-    Dispute, Merchant, MerchantMode, PaymentIntent, PaymentIntentStatus,
+    Bank, Dispute, Merchant, MerchantBankAccount, MerchantMode,
+    MerchantWithdrawal, PaymentIntent, PaymentIntentStatus,
     Settlement, Transaction, WebhookDelivery,
 )
 
@@ -132,6 +133,28 @@ class MerchantSettlementSerializer(serializers.ModelSerializer):
 
     def get_net_amount(self, obj):
         return str(obj.amount - obj.fees)
+
+
+class BankSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Bank
+        fields = ['id', 'name', 'code', 'logo_url', 'country_code', 'currency']
+
+
+class MerchantBankAccountSerializer(serializers.ModelSerializer):
+    bank = BankSerializer(read_only=True)
+
+    class Meta:
+        model = MerchantBankAccount
+        fields = ['id', 'bank', 'account_name', 'account_number', 'is_verified', 'is_default', 'created_at']
+
+
+class MerchantWithdrawalSerializer(serializers.ModelSerializer):
+    bank_account = MerchantBankAccountSerializer(read_only=True)
+
+    class Meta:
+        model = MerchantWithdrawal
+        fields = ['id', 'reference', 'bank_account', 'amount', 'fee_amount', 'currency', 'status', 'created_at', 'completed_at']
 
 
 class MerchantDisputeSerializer(serializers.ModelSerializer):

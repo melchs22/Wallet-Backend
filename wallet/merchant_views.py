@@ -1,7 +1,9 @@
 import csv
 import logging
 import secrets
+import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from rest_framework import exceptions, status
@@ -13,6 +15,7 @@ from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db.models import Q
+from django.db import transaction
 from rest_framework.response import Response
 
 from wallet.merchant_authentication import MerchantApiKeyAuthentication, MerchantApiKeyRateThrottle
@@ -24,13 +27,15 @@ from wallet.merchant_serializers import (
     PaymentIntentSerializer,
     MerchantDisputeCreateSerializer, MerchantDisputeSerializer,
     MerchantRefundCreateSerializer, MerchantSettlementSerializer,
-    MerchantTransactionSerializer,
+    MerchantTransactionSerializer, BankSerializer, MerchantBankAccountSerializer,
+    MerchantWithdrawalSerializer,
 )
 from wallet.models import (
     Dispute, DisputeStatus, Merchant, MerchantTeamMember, MerchantTeamRole,
     PaymentIntent, PaymentIntentStatus, PaymentRequest,
     MerchantStatus,
-    Settlement, Transaction, WebhookDelivery, WebhookDeliveryStatus,
+    AuditLog, Bank, LedgerDirection, LedgerEntry, MerchantBankAccount,
+    MerchantWithdrawal, Settlement, Transaction, WebhookDelivery, WebhookDeliveryStatus,
 )
 from wallet.services.limits import merchant_limit_snapshot
 from wallet.services.fees import preview_merchant_transfer_fee, resolve_fee
@@ -473,6 +478,104 @@ def merchant_session_settlements(request):
     if requested_status and requested_status != 'all':
         settlements = settlements.filter(status=requested_status)
     return Response(MerchantSettlementSerializer(settlements[:100], many=True).data)
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_banks(request):
+    return Response(BankSerializer(Bank.objects.filter(is_active=True), many=True).data)
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_bank_accounts(request):
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        return Response(MerchantBankAccountSerializer(
+            merchant.bank_accounts.select_related('bank')[:100], many=True,
+        ).data)
+    try:
+        bank = Bank.objects.get(id=request.data.get('bank_id'), is_active=True)
+    except (Bank.DoesNotExist, TypeError, ValueError):
+        return Response({'error': 'Active bank not found'}, status=status.HTTP_400_BAD_REQUEST)
+    account_name = str(request.data.get('account_name', '')).strip()
+    account_number = str(request.data.get('account_number', '')).strip()
+    if not account_name or not account_number:
+        return Response({'error': 'Account name and account number are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    account = MerchantBankAccount.objects.create(
+        merchant=merchant, bank=bank, account_name=account_name,
+        account_number=account_number, is_verified=False,
+        is_default=not merchant.bank_accounts.exists(),
+    )
+    return Response(MerchantBankAccountSerializer(account).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([SignedTokenAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def merchant_session_withdrawals(request):
+    merchant = getattr(request.user, 'merchant_account', None)
+    if merchant is None:
+        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'GET':
+        withdrawals = merchant.withdrawals.select_related('bank_account__bank')[:100]
+        return Response(MerchantWithdrawalSerializer(withdrawals, many=True).data)
+
+    try:
+        amount = Decimal(str(request.data.get('amount')))
+    except Exception:
+        return Response({'error': 'A valid withdrawal amount is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    currency = str(request.data.get('currency') or merchant.wallet.currency).upper()
+    if amount < Decimal('2000000'):
+        return Response({'error': 'Merchant withdrawals must be at least 2,000,000 GNF.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        bank_account = merchant.bank_accounts.select_related('bank').get(
+            id=request.data.get('bank_account_id'), is_verified=True,
+        )
+    except (MerchantBankAccount.DoesNotExist, TypeError, ValueError):
+        return Response({'error': 'A verified merchant bank account is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if bank_account.bank.currency != currency:
+        return Response({'error': f'This bank account only accepts {bank_account.bank.currency}.'}, status=status.HTTP_400_BAD_REQUEST)
+    from wallet.services.fees import calculate_transfer_fee
+    fee = calculate_transfer_fee(amount, currency=currency)
+    with transaction.atomic():
+        wallet = merchant.wallet.__class__.objects.select_for_update().get(pk=merchant.wallet_id)
+        if wallet.currency != currency:
+            return Response({'error': f'Wallet currency is {wallet.currency}.'}, status=status.HTTP_400_BAD_REQUEST)
+        if wallet.get_balance() < amount + fee:
+            return Response({'error': 'Insufficient merchant balance.'}, status=status.HTTP_400_BAD_REQUEST)
+        withdrawal = MerchantWithdrawal.objects.create(
+            merchant=merchant, bank_account=bank_account, amount=amount,
+            fee_amount=fee, currency=currency,
+            reference=f'MW-{uuid.uuid4().hex[:16].upper()}',
+            status=MerchantWithdrawal.Status.PROCESSING,
+        )
+        LedgerEntry.objects.create(
+            wallet=wallet, direction=LedgerDirection.DEBIT,
+            amount=amount + fee, transaction=None,
+        )
+        AuditLog.objects.create(
+            user=request.user, action='merchant_bank_withdrawal_initiated',
+            metadata={'withdrawal_id': withdrawal.id, 'reference': withdrawal.reference,
+                      'amount': str(amount), 'fee': str(fee), 'bank_id': bank_account.bank_id},
+        )
+        withdrawal.status = MerchantWithdrawal.Status.COMPLETED
+        withdrawal.completed_at = timezone.now()
+        withdrawal.provider_response = {'simulation': True}
+        withdrawal.save(update_fields=['status', 'completed_at', 'provider_response'])
+    notification = create_notification_record(request.user, 'merchant_withdrawal_completed', {
+        'amount': str(amount), 'fee_amount': str(fee), 'currency': currency,
+        'reference': withdrawal.reference, 'bank_name': bank_account.bank.name,
+    })
+    try:
+        deliver_notification(notification.id)
+    except Exception:
+        logger.exception('merchant_withdrawal_notification_failed')
+    return Response(MerchantWithdrawalSerializer(withdrawal).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET'])
