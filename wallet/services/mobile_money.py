@@ -77,7 +77,7 @@ def process_mobile_money_webhook_event(provider_transaction_id, status, provider
                     wallet=mm_transaction.wallet,
                     transaction=None,
                     direction=LedgerDirection.DEBIT,
-                    amount=mm_transaction.amount,
+                    amount=mm_transaction.amount + mm_transaction.fee_amount,
                 ).delete()
         else:
             raise ValueError(f'Unsupported webhook status: {status}')
@@ -109,6 +109,9 @@ def process_mobile_money_webhook_event(provider_transaction_id, status, provider
                 'amount': str(mm_transaction.amount),
                 'currency': mm_transaction.currency,
                 'status': status,
+                'destination_phone': mm_transaction.destination_phone,
+                'fee_amount': str(mm_transaction.fee_amount),
+                'provider': mm_transaction.linked_provider.provider,
             },
         )
 

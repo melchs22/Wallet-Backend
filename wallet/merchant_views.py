@@ -164,6 +164,7 @@ def merchant_team(request):
                        f'Hello {member.full_name}, you have been invited to join '
                        f'{merchant.business_name} as {member.role}. '
                        f'Login email: {email}. '
+                       f'Login identifier: {email}. '
                        f'Login here: {request.build_absolute_uri("/login")}.'
                    ),
                }}
@@ -173,6 +174,8 @@ def merchant_team(request):
             f' Login email: {email}. Temporary password: {temporary_password}. '
             'Change it after your first login.'
         )
+        payload['invitation']['login_identifier'] = email
+        payload['invitation']['temporary_password'] = temporary_password
         member.credentials_issued_at = timezone.now()
         member.save(update_fields=['credentials_issued_at'])
     delivery = send_multiwa_text(

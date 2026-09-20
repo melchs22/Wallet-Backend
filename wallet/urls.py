@@ -199,6 +199,7 @@ urlpatterns = [
     # Mobile Money
     path('mobile-money/topup', mobile_money_topup, name='mobile_money_topup'),
     path('mobile-money/withdrawal', mobile_money_withdrawal, name='mobile_money_withdrawal'),
+    path('settlements/send', mobile_money_withdrawal, name='settlement_send'),
     path('mobile-money/webhook', mobile_money_webhook, name='mobile_money_webhook'),
     path('mobile-money/transactions', list_mobile_money_transactions, name='list_mobile_money_transactions'),
     path('mobile-money/providers', list_linked_providers, name='list_linked_providers'),

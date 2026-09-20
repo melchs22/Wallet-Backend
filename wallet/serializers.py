@@ -162,6 +162,7 @@ class UserResolveSerializer(serializers.Serializer):
 
 class TransferRequestSerializer(serializers.Serializer):
     recipient_phone = serializers.CharField(required=True, max_length=30, help_text="Recipient's phone number")
+    linked_provider_id = serializers.IntegerField(required=False, allow_null=True)
     amount = serializers.DecimalField(required=True, max_digits=20, decimal_places=2)
     currency = serializers.CharField(required=True, max_length=3)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
@@ -254,6 +255,7 @@ class PushDeviceSerializer(serializers.Serializer):
     device_id = serializers.CharField(max_length=255, required=False, allow_blank=True)
     platform = serializers.CharField(max_length=20, required=False, allow_blank=True)
     device_name = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    language_code = serializers.CharField(max_length=10, required=False, allow_blank=True)
     public_key_pem = serializers.CharField(max_length=4096, required=False, allow_blank=True)
 
 
@@ -686,7 +688,8 @@ class MobileMoneyTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = MobileMoneyTransaction
         fields = [
-            'id', 'user', 'wallet', 'linked_provider', 'type', 'amount', 'fee_amount', 'currency',
+            'id', 'user', 'wallet', 'linked_provider', 'destination_phone', 'destination_country',
+            'receive_currency', 'receive_amount', 'exchange_rate', 'type', 'amount', 'fee_amount', 'currency',
             'status', 'provider_transaction_id', 'provider_reference', 'provider_response',
             'failure_reason', 'created_at', 'updated_at', 'completed_at'
         ]
@@ -707,6 +710,7 @@ class MobileMoneyWithdrawalSerializer(serializers.Serializer):
     Serializer for mobile money withdrawal requests.
     """
     linked_provider_id = serializers.IntegerField(required=True)
+    destination_phone = serializers.CharField(required=False, allow_blank=True, max_length=30)
     amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=True)
     currency = serializers.CharField(max_length=3, required=True)
 

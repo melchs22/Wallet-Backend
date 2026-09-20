@@ -22,6 +22,7 @@ def _service_account_info(value):
 def create_notification_record(user, notification_type, payload):
     """Create the notification row (synchronous, inside the caller's transaction)."""
     payload = dict(payload or {})
+    payload.setdefault('type', notification_type)
     payload.setdefault('title', {
         'transfer_approval_requested': 'Transfer approval required',
         'payment_request_received': 'Payment request received',
@@ -39,6 +40,9 @@ def create_notification_record(user, notification_type, payload):
         'device_signed_in_elsewhere': 'Security notice',
         'new_device_login': 'Approve new device sign-in',
         'device_revoked': 'Device signed out',
+        'mobile_money_withdrawal': 'Transfer sent',
+        'mobile_money_transaction_completed': 'Withdrawal completed',
+        'mobile_money_transaction_failed': 'Withdrawal failed',
     }.get(notification_type, 'DSD PAY'))
     payload.setdefault('message', _notification_message(notification_type, payload))
     return Notification.objects.create(
@@ -71,6 +75,15 @@ def _notification_message(notification_type, payload):
         return f"Approve sign-in from {payload.get('new_device_name', 'a new device')}."
     if notification_type == 'device_revoked':
         return 'This device was signed out remotely.'
+    if notification_type == 'mobile_money_withdrawal':
+        return (
+            f"Your transfer of {amount} {currency} to "
+            f"{payload.get('destination_phone', 'the recipient')} was sent."
+        )
+    if notification_type == 'mobile_money_transaction_completed':
+        return f'Your withdrawal of {amount} {currency} was completed.'
+    if notification_type == 'mobile_money_transaction_failed':
+        return f'Your withdrawal of {amount} {currency} failed.'
     if notification_type == 'parental_link_approved':
         return f"{payload.get('child_display_name', 'Your child')} approved the parental link."
     if notification_type == 'parental_link_declined':
@@ -80,6 +93,56 @@ def _notification_message(notification_type, payload):
     if notification_type == 'incoming_transfer':
         return f"{payload.get('sender_display_name', 'A user')} started a transfer of {amount} {currency}."
     return 'You have a new wallet update.'
+
+
+def _localized_notification_content(notification_type, payload, language_code):
+    """Return the notification-bar copy for the device's preferred language."""
+    if language_code != 'fr':
+        return (
+            payload.get('title', 'DSD PAY'),
+            payload.get('message', _notification_message(notification_type, payload)),
+        )
+
+    amount = payload.get('amount')
+    currency = payload.get('currency', '')
+    sender = payload.get('sender_display_name', 'Un utilisateur')
+    if notification_type == 'transfer_approval_requested':
+        return ('Approbation de transfert requise', f'{sender} veut envoyer {amount} {currency}.')
+    if notification_type == 'payment_request_received':
+        return ('Demande de paiement reçue', f'{payload.get("requester_display_name", "Un utilisateur")} demande {amount} {currency}.')
+    if notification_type == 'split_request_received':
+        return ('Paiement partagé demandé', f'Une demande de paiement de {amount} {currency} attend votre approbation.')
+    if notification_type == 'parental_link_requested':
+        return ('Approbation parentale requise', f'{payload.get("parent_display_name", "Un parent")} veut associer votre compte.')
+    if notification_type in ('money_received', 'qr_payment_received', 'transfer_received'):
+        return ('Argent reçu', f'Vous avez reçu {amount} {currency}.')
+    if notification_type == 'incoming_transfer':
+        return ('Transfert entrant', f'{sender} a commencé un transfert de {amount} {currency}.')
+    if notification_type == 'payment_request_declined':
+        return ('Demande refusée', f'{payload.get("payer_display_name", "Le payeur")} a refusé votre demande de {amount} {currency}.')
+    if notification_type == 'payment_request_expired':
+        return ('Demande expirée', f'Votre demande de {amount} {currency} a expiré.')
+    if notification_type == 'payment_request_paid':
+        return ('Demande payée', f'Votre demande de {amount} {currency} a été payée.')
+    if notification_type == 'new_device_login':
+        return ('Nouveau appareil', f'Approuvez la connexion depuis {payload.get("new_device_name", "un nouvel appareil")}.')
+    if notification_type == 'device_signed_in_elsewhere':
+        return ('Alerte de sécurité', 'Un nouvel appareil s’est connecté à votre portefeuille.')
+    if notification_type == 'device_revoked':
+        return ('Appareil déconnecté', 'Cet appareil a été déconnecté à distance.')
+    if notification_type == 'mobile_money_withdrawal':
+        return ('Transfert envoyé', f'Votre transfert de {amount} {currency} vers {payload.get("destination_phone", "le destinataire")} a été envoyé.')
+    if notification_type == 'mobile_money_transaction_completed':
+        return ('Retrait terminé', f'Votre retrait de {amount} {currency} est terminé.')
+    if notification_type == 'mobile_money_transaction_failed':
+        return ('Échec du retrait', f'Votre retrait de {amount} {currency} a échoué.')
+    if notification_type == 'parental_link_approved':
+        return ('Lien parental approuvé', f'{payload.get("child_display_name", "Votre enfant")} a approuvé le lien parental.')
+    if notification_type == 'parental_link_declined':
+        return ('Lien parental refusé', f'{payload.get("child_display_name", "L’enfant")} a refusé le lien parental.')
+    if notification_type == 'parental_link_approved':
+        return ('Lien parental approuvé', f'{payload.get("child_display_name", "Votre enfant")} a approuvé le lien parental.')
+    return ('DSD PAY', 'Vous avez une nouvelle mise à jour de votre portefeuille.')
 
 
 def deliver_notification(notification_id):
@@ -180,25 +243,33 @@ def _send_push(notification):
         devices = devices.filter(device_id=target_device_id)
     if not devices.exists():
         return
-    message = messaging.MulticastMessage(
-        tokens=list(devices.values_list('token', flat=True)),
-        notification=messaging.Notification(
-            title=payload.get('title', 'DSD PAY'),
-            body=payload.get('message', 'You have a new wallet update.'),
-        ),
-        data={key: str(value) for key, value in payload.items() if value is not None},
-        apns=messaging.APNSConfig(
-            headers={'apns-push-type': 'alert', 'apns-priority': '10'},
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(sound='default', badge=1),
+    data = {key: str(value) for key, value in payload.items() if value is not None}
+    devices_by_language = {}
+    for device in devices:
+        language = (device.language_code or 'fr').split('-', 1)[0].lower()
+        devices_by_language.setdefault(language, []).append(device)
+
+    for language, language_devices in devices_by_language.items():
+        title, body = _localized_notification_content(notification.type, payload, language)
+        message = messaging.MulticastMessage(
+            tokens=[device.token for device in language_devices],
+            notification=messaging.Notification(title=title, body=body),
+            data=data,
+            apns=messaging.APNSConfig(
+                headers={'apns-push-type': 'alert', 'apns-priority': '10'},
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(sound='default', badge=1),
+                ),
             ),
         ),
-    )
-    response = messaging.send_each_for_multicast(message)
-    for device, result in zip(devices, response.responses):
-        if not result.success and 'registration-token-not-registered' in str(result.exception):
-            device.active = False
-            device.save(update_fields=['active'])
+        response = messaging.send_each_for_multicast(message)
+        for device, result in zip(language_devices, response.responses):
+            if not result.success and (
+                'registration-token-not-registered' in str(result.exception)
+                or 'not a valid FCM registration token' in str(result.exception)
+            ):
+                device.active = False
+                device.save(update_fields=['active'])
 
 
 def broadcast_notification(notification_type, payload, user_ids=None):

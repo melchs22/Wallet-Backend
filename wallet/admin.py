@@ -204,7 +204,7 @@ class NotificationAdmin(admin.ModelAdmin):
 
 @admin.register(PushDevice)
 class PushDeviceAdmin(admin.ModelAdmin):
-    list_display = ['user', 'device_name', 'platform', 'active', 'last_seen_at', 'created_at']
+    list_display = ['user', 'device_name', 'platform', 'language_code', 'active', 'last_seen_at', 'created_at']
     list_filter = ['platform', 'active']
     search_fields = ['user__email', 'user__handle', 'token']
     readonly_fields = ['token', 'last_seen_at', 'created_at']

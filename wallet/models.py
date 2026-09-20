@@ -469,6 +469,7 @@ class PushDevice(models.Model):
     device_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
     platform = models.CharField(max_length=20, blank=True, default='')
     device_name = models.CharField(max_length=120, blank=True, default='')
+    language_code = models.CharField(max_length=10, blank=True, default='fr')
     active = models.BooleanField(default=True)
     last_seen_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -884,6 +885,16 @@ class MobileMoneyTransaction(models.Model):
         on_delete=models.PROTECT,
         related_name='mobile_money_transactions'
     )
+    destination_phone = models.CharField(
+        max_length=30,
+        blank=True,
+        default='',
+        help_text='External recipient phone; no wallet account is created for this recipient.',
+    )
+    destination_country = models.CharField(max_length=2, blank=True, default='')
+    receive_currency = models.CharField(max_length=3, blank=True, default='')
+    receive_amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    exchange_rate = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     type = models.CharField(
         max_length=20,
         choices=MobileMoneyTransactionType.choices

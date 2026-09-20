@@ -744,6 +744,10 @@ def logout_view(request):
     """
     Logout the current user.
     """
+    PushDevice.objects.filter(user=request.user).delete()
+    TrustedDevice.objects.filter(user=request.user).delete()
+    request.user.current_device_id = None
+    request.user.save(update_fields=['current_device_id'])
     logout(request)
     return Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
 
@@ -1113,6 +1117,7 @@ class PushDeviceView(APIView):
                 'device_id': serializer.validated_data.get('device_id', ''),
                 'platform': serializer.validated_data.get('platform', ''),
                 'device_name': serializer.validated_data.get('device_name', ''),
+                'language_code': serializer.validated_data.get('language_code', 'fr')[:10].lower(),
                 'active': True,
             },
         )
@@ -1355,6 +1360,7 @@ class TransferView(APIView):
         recipient_phone = serializer.validated_data['recipient_phone']
         amount = serializer.validated_data['amount']
         currency = serializer.validated_data['currency']
+        linked_provider_id = serializer.validated_data.get('linked_provider_id')
         note = serializer.validated_data.get('note', '')
         idempotency_key = serializer.validated_data['idempotency_key']
 
@@ -1465,6 +1471,85 @@ class TransferView(APIView):
                         status=UserStatus.ACTIVE
                     )
                 except User.DoesNotExist:
+                    if linked_provider_id:
+                        linked_provider = LinkedProvider.objects.filter(
+                            id=linked_provider_id,
+                            user=sender,
+                            verification_status=LinkedProvider.VerificationStatus.VERIFIED,
+                        ).first()
+                        if not linked_provider:
+                            return Response(
+                                {'code': 'provider_not_found', 'message': 'Select a verified payment provider.'},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                        country = SupportedCountry.objects.filter(
+                            code=serializer.validated_data.get('country_code', 'GN').upper(),
+                            active=True,
+                        ).first()
+                        if not country:
+                            return Response(
+                                {'code': 'unsupported_country', 'message': 'Transfer destination is unavailable.'},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                        from wallet.services.fees import calculate_transfer_fee
+                        fee_amount = (
+                            (amount * Decimal('0.04')).quantize(Decimal('0.01'))
+                            if country.code != 'GN'
+                            else calculate_transfer_fee(amount, currency=currency)
+                        )
+                        total_debit = amount + fee_amount
+                        sender_wallet = Wallet.objects.select_for_update().get(pk=sender_wallet.pk)
+                        if sender_wallet.get_balance() < total_debit:
+                            return Response({'code': 'insufficient_funds', 'message': 'Insufficient funds.'}, status=400)
+                        if total_debit > sender.send_limit_per_tx:
+                            return Response({'code': 'per_transaction_limit_exceeded', 'message': 'Amount exceeds per-transaction limit.'}, status=400)
+                        from wallet.services.exchange_rates import get_active_exchange_rate
+                        receive_currency = (country.currency or currency).upper()
+                        rate = Decimal('1')
+                        if receive_currency != currency:
+                            exchange_rate = get_active_exchange_rate(currency, receive_currency)
+                            if not exchange_rate:
+                                return Response({'code': 'no_exchange_rate', 'message': 'No exchange rate available.'}, status=400)
+                            rate = exchange_rate.rate
+                        receive_amount = (amount * rate).quantize(Decimal('0.01'))
+                        external = MobileMoneyTransaction.objects.create(
+                            user=sender,
+                            wallet=sender_wallet,
+                            linked_provider=linked_provider,
+                            destination_phone=recipient_phone,
+                            destination_country=country.code,
+                            receive_currency=receive_currency,
+                            receive_amount=receive_amount,
+                            exchange_rate=rate,
+                            type=MobileMoneyTransactionType.WITHDRAWAL,
+                            amount=amount,
+                            fee_amount=fee_amount,
+                            currency=currency,
+                            status=MobileMoneyTransactionStatus.PROCESSING,
+                            provider_transaction_id=f'PROV-{uuid.uuid4().hex[:16]}',
+                        )
+                        LedgerEntry.objects.create(
+                            wallet=sender_wallet,
+                            transaction=None,
+                            direction=LedgerDirection.DEBIT,
+                            amount=total_debit,
+                        )
+                        from wallet.tasks import process_mobile_money_webhook
+                        process_mobile_money_webhook.delay(
+                            external.provider_transaction_id,
+                            'completed',
+                            {'external_recipient': True, 'destination_phone': recipient_phone},
+                        )
+                        create_notification(
+                            sender,
+                            'mobile_money_withdrawal',
+                            {'amount': str(amount), 'fee_amount': str(fee_amount), 'currency': currency,
+                             'destination_phone': recipient_phone, 'country_code': country.code},
+                        )
+                        return Response(
+                            MobileMoneyTransactionSerializer(external).data,
+                            status=status.HTTP_201_CREATED,
+                        )
                     # A2: Log failed transfer attempt
                     TransferAttempt.objects.create(
                         user=sender,
@@ -2001,7 +2086,11 @@ class CloseAccountView(APIView):
         try:
             with transaction.atomic():
                 user.status = UserStatus.CLOSED
-                user.save()
+                user.is_active = False
+                user.current_device_id = None
+                user.save(update_fields=['status', 'is_active', 'current_device_id'])
+                PushDevice.objects.filter(user=user).delete()
+                TrustedDevice.objects.filter(user=user).delete()
                 
                 # Audit log
                 AuditLog.objects.create(
@@ -4747,8 +4836,11 @@ def mobile_money_withdrawal(request):
         return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.WITHDRAWAL, 'error': 'Fresh device verification is required before withdrawing money.'}, status=status.HTTP_403_FORBIDDEN)
 
     linked_provider_id = serializer.validated_data['linked_provider_id']
+    destination_phone = serializer.validated_data.get('destination_phone', '').strip()
     amount = serializer.validated_data['amount']
     currency = serializer.validated_data['currency']
+    from wallet.services.fees import calculate_transfer_fee
+    fee_amount = calculate_transfer_fee(amount, currency=currency)
 
     try:
         with transaction.atomic():
@@ -4763,6 +4855,14 @@ def mobile_money_withdrawal(request):
                 return Response(
                     {'error': 'Linked provider not found or not verified'},
                     status=status.HTTP_404_NOT_FOUND
+                )
+            destination_phone = destination_phone or str(
+                (linked_provider.provider_metadata or {}).get('phone_number') or ''
+            ).strip()
+            if not destination_phone:
+                return Response(
+                    {'error': 'A destination phone number is required.'},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             # Get user's wallet in the requested currency
@@ -4787,6 +4887,7 @@ def mobile_money_withdrawal(request):
                 user=request.user,
                 wallet=wallet,
                 linked_provider=linked_provider,
+                destination_phone=destination_phone,
                 type=MobileMoneyTransactionType.WITHDRAWAL,
                 amount=amount,
                 fee_amount=fee_amount,
