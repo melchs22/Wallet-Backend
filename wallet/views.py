@@ -350,39 +350,6 @@ class EmailLoginView(APIView):
             user=user, is_active=True, accepted_at__isnull=True,
         ).update(accepted_at=timezone.now())
 
-        # Merchant workspaces always require a one-time SMS code after the
-        # password is accepted. No session or access token is issued yet.
-        if hasattr(user, 'merchant_account'):
-            if not (user.primary_phone_number or user.phone_number):
-                return Response(
-                    {'error': 'A verified phone number is required to access the merchant portal.'},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-            challenge, code = create_otp_challenge(
-                user,
-                OtpChallenge.Purpose.LOGIN,
-                request,
-                device_id=device_id,
-                device_name=serializer.validated_data.get('device_name', ''),
-            )
-            delivery = send_otp_sms(challenge, code)
-            if delivery.get('status') != 'sent':
-                challenge.consumed_at = timezone.now()
-                challenge.save(update_fields=['consumed_at'])
-                return Response(
-                    {'error': 'We could not send your login code. Please try again later.'},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-            return Response(
-                {
-                    'status': 'otp_required',
-                    'challenge_id': str(challenge.request_id),
-                    'expires_in': 300,
-                    'destination': (user.primary_phone_number or user.phone_number)[-4:],
-                },
-                status=status.HTTP_202_ACCEPTED,
-            )
-
         device = TrustedDevice.objects.filter(
             user=user, device_id=device_id, is_trusted=True, revoked_at__isnull=True,
         ).first() if device_id else None
