@@ -50,4 +50,5 @@ class MerchantApiKeyRateThrottle(throttling.SimpleRateThrottle):
         api_key = getattr(request, 'merchant_api_key', None)
         if api_key is None:
             return None
-        return self.cache_format % {'ident': api_key.public_key}
+        ident = api_key.public_key
+        return f'{self.scope}:{ident}'
