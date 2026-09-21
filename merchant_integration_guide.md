@@ -80,6 +80,8 @@ To use it:
 3. Trigger a payment to see webhooks arrive
 4. View received webhooks at: `http://localhost:5000/webhooks`
 
+**Note**: The API now accepts both HTTP and HTTPS webhook URLs for testing purposes.
+
 ### Webhook Events Available
 - `payment_intent.succeeded` - Payment completed successfully
 - `payment_intent.failed` - Payment failed

@@ -145,6 +145,10 @@ def main():
     
     print(f"Setting webhook URL to: {webhook_url}")
     print(f"Subscribing to events: {webhook_events}")
+    print("Note: HTTP URLs are now allowed for testing purposes")
+    
+    print(f"Setting webhook URL to: {webhook_url}")
+    print(f"Subscribing to events: {webhook_events}")
     
     settings_result = client.update_settings(webhook_url, webhook_events)
     if settings_result:

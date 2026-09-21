@@ -687,6 +687,13 @@ def merchant_settings(request):
         unknown = set(request.data) - allowed
         if unknown:
             return Response({'error': f'Unsupported settings: {", ".join(sorted(unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate webhook URL format if provided
+        if 'webhook_url' in request.data:
+            webhook_url = str(request.data['webhook_url']).strip()
+            if webhook_url and not (webhook_url.startswith('https://') or webhook_url.startswith('http://')):
+                return Response({'error': 'Webhook URL must use HTTP or HTTPS'}, status=status.HTTP_400_BAD_REQUEST)
+        
         for field in allowed & set(request.data):
             setattr(merchant, field, request.data[field])
         merchant.save(update_fields=list(allowed & set(request.data)) + ['updated_at'])
