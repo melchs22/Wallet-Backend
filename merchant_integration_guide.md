@@ -30,15 +30,10 @@ This will:
 
 ## Step 2: Configure Test Script
 
-Edit `test_merchant_integration.sh` and replace:
-```bash
-MERCHANT_SECRET_KEY="YOUR_SECRET_KEY_HERE"
-```
+**Note**: The test scripts have been pre-configured with your new secret key:
+- `sk_live_YFpHcee-PKzEoal8bLG_zpQx6U2lBIX9nRcdJbFnBbg`
 
-With your actual secret key:
-```bash
-MERCHANT_SECRET_KEY="sk_live_7JKwbeaht5-7..."
-```
+If you need to change it, edit the files and replace the `MERCHANT_SECRET_KEY` value.
 
 ## Step 3: Run Integration Tests
 

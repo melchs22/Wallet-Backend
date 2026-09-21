@@ -6,10 +6,7 @@
 
 # Configuration
 API_BASE_URL="http://178.128.156.225/api/merchant-api"
-# NOTE: You need to use the SECRET key (starts with sk_live_), not the public key (pk_live_)
-# The secret key can be found in the Django admin at /admin/wallet/merchantapikey/2/change/
-# or by generating new keys via the admin interface
-MERCHANT_SECRET_KEY="YOUR_SECRET_KEY_HERE"  # Replace with actual secret key like: sk_live_7JKwbeaht5-7...
+MERCHANT_SECRET_KEY="sk_live_YFpHcee-PKzEoal8bLG_zpQx6U2lBIX9nRcdJbFnBbg"
 WEBHOOK_PORT=5000
 WEBHOOK_SECRET="Mi7kMWOPPeJ1659mYH6MF9gz5DHisVB3ucE0uJXe3CQ"
 
@@ -19,17 +16,6 @@ echo "==========================================================================
 echo "API Base URL: $API_BASE_URL"
 echo "Merchant ID: 1"
 echo "Webhook will run on port: $WEBHOOK_PORT"
-
-# Check if secret key is set
-if [ "$MERCHANT_SECRET_KEY" = "YOUR_SECRET_KEY_HERE" ]; then
-    echo ""
-    echo "❌ ERROR: Please set the actual merchant SECRET key in the script."
-    echo "   The key should start with 'sk_live_' or 'sk_test_'"
-    echo "   You can find it at: http://178.128.156.225/admin/wallet/merchantapikey/2/change/"
-    echo "   Or generate new keys via the Django admin interface"
-    exit 1
-fi
-
 echo ""
 
 # Function to make API calls
