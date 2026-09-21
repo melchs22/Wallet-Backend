@@ -34,7 +34,7 @@ def getenv_list(key: str, default):
 # Django Configuration
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-local-development-only')
 DEBUG = getenv_bool('DEBUG', False)
-ALLOWED_HOSTS = ['178.128.156.225', 'localhost', '127.0.0.1', 'https://backend.p-space.ai']
+ALLOWED_HOSTS = ['178.128.156.225', 'localhost', '127.0.0.1', 'backend.p-space.ai']
 
 # CORS Configuration
 FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'http://178.128.156.225')
