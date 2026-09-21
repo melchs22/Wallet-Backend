@@ -314,6 +314,15 @@ def checkout_confirm(request, intent_id):
 
     try:
         intent = PaymentIntent.objects.select_related('merchant').get(pk=intent_id)
+        payment_method = serializer.validated_data.get('payment_method', 'wallet')
+        
+        # Validate payment method if needed
+        if payment_method not in ['wallet', 'mobile_money', 'bank_transfer']:
+            return Response(
+                {'error': 'Invalid payment method'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         transaction_obj = confirm_payment_intent(
             intent,
             request.user,
@@ -324,6 +333,7 @@ def checkout_confirm(request, intent_id):
             'status': intent.status,
             'transaction_id': str(transaction_obj.id),
             'return_url': intent.return_url,
+            'payment_method': payment_method,
         })
     except PaymentIntent.DoesNotExist:
         return Response({'error': 'Payment intent not found'}, status=status.HTTP_404_NOT_FOUND)

@@ -140,7 +140,7 @@ def main():
     print("\n" + "=" * 70)
     print("TEST 2b: Update Webhook Settings")
     print("=" * 70)
-    webhook_url = "http://178.128.156.225:5000/webhook"  # Default webhook receiver URL
+    webhook_url = "http://178.128.156.225:5001/webhook"  # Default webhook receiver URL
     webhook_events = ['payment_intent.succeeded', 'payment_intent.failed', 'payment_intent.canceled']
     
     print(f"Setting webhook URL to: {webhook_url}")

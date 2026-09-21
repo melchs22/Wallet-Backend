@@ -145,14 +145,21 @@ def expire_payment_intents():
 def get_checkout_public_detail(intent):
     return {
         'id': intent.id,
-        'merchant_name': intent.merchant.business_name,
         'amount': str(intent.amount),
         'currency': intent.currency,
         'description': intent.description,
+        'external_reference': intent.external_reference,
         'status': intent.status,
         'mode': intent.mode,
-        'expires_at': intent.expires_at.isoformat(),
+        'checkout_url': checkout_url_for_intent(intent),
         'return_url': intent.return_url,
+        'expires_at': intent.expires_at.isoformat(),
+        'created_at': intent.created_at.isoformat(),
+        'merchant': {
+            'business_name': intent.merchant.business_name,
+            'logo': intent.merchant.logo_url if hasattr(intent.merchant, 'logo_url') else None,
+            'description': intent.merchant.description,
+        },
     }
 
 

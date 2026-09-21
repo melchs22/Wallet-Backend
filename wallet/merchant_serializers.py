@@ -42,6 +42,7 @@ class PaymentIntentSerializer(serializers.ModelSerializer):
 
 class CheckoutConfirmSerializer(serializers.Serializer):
     idempotency_key = serializers.CharField(max_length=255)
+    payment_method = serializers.CharField(required=False, allow_blank=True, default='wallet')
 
 
 class FeePreviewQuerySerializer(serializers.Serializer):
