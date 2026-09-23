@@ -33,7 +33,7 @@ from wallet.merchant_serializers import (
 from wallet.models import (
     Dispute, DisputeStatus, Merchant, MerchantTeamMember, MerchantTeamRole,
     PaymentIntent, PaymentIntentStatus, PaymentRequest,
-    MerchantStatus,
+    MerchantMode, MerchantStatus,
     AuditLog, Bank, LedgerDirection, LedgerEntry, MerchantBankAccount,
     MerchantWithdrawal, Settlement, Transaction, WebhookDelivery, WebhookDeliveryStatus,
 )
@@ -47,12 +47,18 @@ from wallet.services.payment_intents import (
     create_payment_intent,
     get_checkout_public_detail,
 )
-from wallet.services.merchants import merchant_public_identifier
+from wallet.services.merchants import merchant_code, merchant_public_identifier
 from wallet.services.notifications import create_notification_record, deliver_notification
 from wallet.services.phone import phone_lookup_values
 from wallet.models import FeeAppliesTo
 
 logger = logging.getLogger(__name__)
+
+
+def _active_public_merchant(identifier):
+    value = str(identifier).strip()
+    query = Q(public_identifier=value) | Q(merchant_code=value)
+    return Merchant.objects.filter(query, status=MerchantStatus.ACTIVE).first()
 
 
 def _merchant_from_request(request):
@@ -409,14 +415,20 @@ def admin_merchant_webhook_deliveries(request, merchant_id):
 
 def _merchant_transactions(merchant, mode):
     from django.db.models import Q
+    # A transaction is associated with an environment by the payment intent
+    # that created it.  Keep the wallet check for older/direct transactions
+    # that predate payment intents, otherwise a merchant's two environments
+    # would expose the same recipient history.
+    from wallet.services.merchants import get_merchant_wallet
+    wallet = get_merchant_wallet(merchant, mode)
     return Transaction.objects.filter(
         Q(payment_intents__merchant=merchant, payment_intents__mode=mode)
-        | Q(recipient=merchant.user),
+        | Q(recipient=merchant.user, ledger_entries__wallet=wallet),
     ).distinct().select_related('sender', 'recipient').prefetch_related('payment_intents')
 
 
 def _session_merchant_mode(request):
-    mode = request.query_params.get('mode', 'sandbox').lower()
+    mode = (request.query_params.get('mode') or request.query_params.get('environment') or 'sandbox').lower()
     if mode not in ('sandbox', 'live'):
         raise ValueError('Invalid merchant environment')
     if mode == 'live' and request.user.merchant_account.status != 'active':
@@ -483,6 +495,16 @@ def merchant_session_settlements(request):
     merchant = getattr(request.user, 'merchant_account', None)
     if merchant is None:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        mode = _session_merchant_mode(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    if mode == 'sandbox' and request.method == 'GET':
+        return Response([])
+    if mode == 'sandbox':
+        return Response([])
     settlements = merchant.settlements.order_by('-created_at')
     requested_status = request.query_params.get('status')
     if requested_status and requested_status != 'all':
@@ -518,7 +540,7 @@ def merchant_session_bank_accounts(request):
         return Response({'error': 'Account name and account number are required.'}, status=status.HTTP_400_BAD_REQUEST)
     account = MerchantBankAccount.objects.create(
         merchant=merchant, bank=bank, account_name=account_name,
-        account_number=account_number, is_verified=False,
+        account_number=account_number, is_verified=True,
         is_default=not merchant.bank_accounts.exists(),
     )
     return Response(MerchantBankAccountSerializer(account).data, status=status.HTTP_201_CREATED)
@@ -531,6 +553,17 @@ def merchant_session_withdrawals(request):
     merchant = getattr(request.user, 'merchant_account', None)
     if merchant is None:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        mode = _session_merchant_mode(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except PermissionError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+    if mode == 'sandbox':
+        return Response(
+            {'error': 'Settlement withdrawals are not available in sandbox mode.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
     if request.method == 'GET':
         withdrawals = merchant.withdrawals.select_related('bank_account__bank')[:100]
         return Response(MerchantWithdrawalSerializer(withdrawals, many=True).data)
@@ -543,9 +576,17 @@ def merchant_session_withdrawals(request):
     if amount < Decimal('2000000'):
         return Response({'error': 'Merchant withdrawals must be at least 2,000,000 GNF.'}, status=status.HTTP_400_BAD_REQUEST)
     try:
-        bank_account = merchant.bank_accounts.select_related('bank').get(
-            id=request.data.get('bank_account_id'), is_verified=True,
+        bank_account_id = request.data.get('bank_account_id')
+        bank_accounts = merchant.bank_accounts.select_related('bank')
+        bank_account = (
+            bank_accounts.get(id=bank_account_id)
+            if bank_account_id
+            else bank_accounts.filter(is_default=True).first()
         )
+        if bank_account is None:
+            bank_account = bank_accounts.order_by('created_at').first()
+        if bank_account is None:
+            raise MerchantBankAccount.DoesNotExist
     except (MerchantBankAccount.DoesNotExist, TypeError, ValueError):
         return Response({'error': 'A verified merchant bank account is required.'}, status=status.HTTP_400_BAD_REQUEST)
     if bank_account.bank.currency != currency:
@@ -670,6 +711,8 @@ def merchant_transaction_detail(request, transaction_id):
 @throttle_classes([MerchantApiKeyRateThrottle])
 def merchant_settlements(request):
     merchant = _merchant_from_request(request)
+    if request.merchant_api_mode == MerchantMode.SANDBOX:
+        return Response([])
     settlements = Settlement.objects.filter(merchant=merchant).order_by('-created_at')
     if request.query_params.get('status'):
         settlements = settlements.filter(status=request.query_params['status'])
@@ -721,13 +764,12 @@ def merchant_settings(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def merchant_public_profile(request, identifier):
-    merchant = Merchant.objects.filter(
-        public_identifier=identifier, status=MerchantStatus.ACTIVE,
-    ).first()
+    merchant = _active_public_merchant(identifier)
     if not merchant:
         return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
     return Response({
         'public_identifier': merchant_public_identifier(merchant),
+        'merchant_code': merchant_code(merchant),
         'business_name': merchant.business_name,
         'description': merchant.description,
         'website_url': merchant.website_url,
@@ -740,7 +782,7 @@ def merchant_public_profile(request, identifier):
 @permission_classes([AllowAny])
 def merchant_payment_prompt(request, identifier):
     """Create a normal wallet payment request so app approval/realtime flows remain intact."""
-    merchant = Merchant.objects.filter(public_identifier=identifier, status=MerchantStatus.ACTIVE).first()
+    merchant = _active_public_merchant(identifier)
     if not merchant:
         return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
     from wallet.models import User, WalletStatus, PaymentRequestStatus
@@ -790,9 +832,7 @@ def merchant_payment_prompt(request, identifier):
 @permission_classes([AllowAny])
 def merchant_payment_prompt_status(request, identifier, payment_request_id):
     """Return the public completion state for one payment-link request."""
-    merchant = Merchant.objects.filter(
-        public_identifier=identifier, status=MerchantStatus.ACTIVE
-    ).first()
+    merchant = _active_public_merchant(identifier)
     if not merchant:
         return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
     token = str(request.query_params.get('token') or '')

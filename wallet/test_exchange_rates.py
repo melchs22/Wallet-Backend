@@ -1,6 +1,7 @@
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import requests
 from django.test import TestCase, override_settings
 
 from wallet.models import ExchangeRate, SupportedCountry, Wallet
@@ -37,8 +38,26 @@ class ExchangeRateServiceTestCase(TestCase):
         self.assertEqual(result['base'], 'USD')
         self.assertEqual(result['rates']['EUR'], 0.86)
 
+    @patch('wallet.services.exchange_rates.requests.get')
+    def test_fetch_falls_back_when_primary_is_unavailable(self, mock_get):
+        primary = MagicMock()
+        primary.raise_for_status.side_effect = requests.HTTPError('403')
+        fallback = MagicMock()
+        fallback.raise_for_status = MagicMock()
+        fallback.json.return_value = {
+            'base': 'USD',
+            'rates': {'EUR': 0.86},
+        }
+        mock_get.side_effect = [primary, fallback]
+
+        result = fetch_latest_rates('USD')
+
+        self.assertEqual(result['source'], 'frankfurter.app')
+        self.assertEqual(result['rates']['EUR'], 0.86)
+        self.assertEqual(mock_get.call_count, 2)
+
     @patch('wallet.services.exchange_rates.fetch_latest_rates')
-    def test_refresh_creates_new_rows_without_updating_old(self, mock_fetch):
+    def test_refresh_replaces_old_rows(self, mock_fetch):
         mock_fetch.return_value = {
             'base': 'USD',
             'timestamp': 1786996800,
@@ -56,15 +75,31 @@ class ExchangeRateServiceTestCase(TestCase):
         }
         second = refresh_exchange_rates(base_currencies=['USD'], target_currencies=['USD', 'EUR', 'GBP'])
         self.assertEqual(second['created_count'], 2)
-        # Historical row preserved — two EUR rates now exist
-        self.assertEqual(ExchangeRate.objects.filter(from_currency='USD', to_currency='EUR').count(), 2)
+        # A replacement refresh must not retain stale rows.
+        self.assertEqual(ExchangeRate.objects.filter(from_currency='USD', to_currency='EUR').count(), 1)
 
         active = get_active_exchange_rate('USD', 'EUR')
         self.assertEqual(active.rate, Decimal('0.87'))
-        expired = ExchangeRate.objects.filter(
-            from_currency='USD', to_currency='EUR', valid_until__isnull=False
-        ).first()
-        self.assertIsNotNone(expired)
+        self.assertFalse(ExchangeRate.objects.filter(valid_until__isnull=False).exists())
+
+    @patch('wallet.services.exchange_rates.fetch_latest_rates')
+    def test_refresh_failure_preserves_existing_rows(self, mock_fetch):
+        ExchangeRate.objects.create(
+            from_currency='USD',
+            to_currency='EUR',
+            rate=Decimal('0.86'),
+            source='test',
+            valid_from='2026-01-01T00:00:00Z',
+        )
+        mock_fetch.side_effect = ValueError('provider unavailable')
+
+        with self.assertRaises(RuntimeError):
+            refresh_exchange_rates(
+                base_currencies=['USD'],
+                target_currencies=['USD', 'EUR'],
+            )
+
+        self.assertEqual(ExchangeRate.objects.count(), 1)
 
     @patch('wallet.services.exchange_rates.fetch_latest_rates')
     def test_refresh_uses_wallet_currencies(self, mock_fetch):

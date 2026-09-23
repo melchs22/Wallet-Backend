@@ -759,6 +759,7 @@ class MerchantSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'user_handle', 'business_name',
             'public_identifier',
+            'merchant_code',
             'business_type', 'description', 'status',
             'static_qr_code', 'static_qr_payload', 'static_qr_signature',
             'wallet', 'wallet_currency', 'logo_url', 'contact_email', 'contact_phone',

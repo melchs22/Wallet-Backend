@@ -35,25 +35,6 @@ def list_pending_approvals(request):
 @transaction.atomic
 def approve_transaction(request, approval_id):
     """Approve a pending transaction approval with PIN verification."""
-    # Verify PIN
-    serializer = PinVerifySerializer(data=request.data)
-    if not serializer.is_valid():
-        return Response(serializer.errors, status=400)
-    
-    pin = serializer.validated_data['pin']
-    
-    # Check if user has a PIN set
-    if not request.user.transaction_pin:
-        return Response({'error': 'No transaction PIN set. Please set it in your profile.'}, status=400)
-    
-    # Verify PIN
-    if not check_password(pin, request.user.transaction_pin):
-        if request.user.transaction_pin == pin:
-            request.user.transaction_pin = make_password(pin)
-            request.user.save(update_fields=['transaction_pin'])
-        else:
-            return Response({'error': 'Incorrect PIN'}, status=400)
-    
     try:
         approval = TransactionApproval.objects.select_for_update().get(
             id=approval_id,
@@ -62,6 +43,20 @@ def approve_transaction(request, approval_id):
         )
     except TransactionApproval.DoesNotExist:
         return Response({'error': 'Approval not found or already processed'}, status=404)
+
+    if approval.approval_type != 'parental_link':
+        serializer = PinVerifySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        pin = serializer.validated_data['pin']
+        if not request.user.transaction_pin:
+            return Response({'error': 'No transaction PIN set. Please set it in your profile.'}, status=400)
+        if not check_password(pin, request.user.transaction_pin):
+            if request.user.transaction_pin == pin:
+                request.user.transaction_pin = make_password(pin)
+                request.user.save(update_fields=['transaction_pin'])
+            else:
+                return Response({'error': 'Incorrect PIN'}, status=400)
     
     # Check if expired
     if approval.expires_at and approval.expires_at < timezone.now():
@@ -203,6 +198,20 @@ def approve_transaction(request, approval_id):
             payment_request.resulting_transaction = transaction_obj
             payment_request.save(update_fields=['status', 'resulting_transaction'])
             approval.transaction = transaction_obj
+            from .views import create_notification
+            create_notification(
+                approval.approver,
+                'payment_sent',
+                {
+                    'amount': str(transaction_obj.amount),
+                    'currency': transaction_obj.currency,
+                    'fee_amount': str(transaction_obj.fee_amount),
+                    'balance_after': str(approval.approver.wallet.get_balance()),
+                    'recipient_display_name': approval.requester.display_name,
+                    'recipient_handle': approval.requester.handle,
+                    'transaction_id': str(transaction_obj.id),
+                },
+            )
         elif approval.split_request:
             participant = SplitParticipant.objects.select_related('payment_request').filter(
                 split_request=approval.split_request,
@@ -254,25 +263,7 @@ def approve_transaction(request, approval_id):
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def decline_transaction(request, approval_id):
-    """Decline a pending transaction approval with PIN verification."""
-    # Verify PIN
-    serializer = PinVerifySerializer(data=request.data)
-    if not serializer.is_valid():
-        return Response(serializer.errors, status=400)
-    
-    pin = serializer.validated_data['pin']
-    
-    # Check if user has a PIN set
-    if not request.user.transaction_pin:
-        return Response({'error': 'No transaction PIN set. Please set it in your profile.'}, status=400)
-    
-    # Verify PIN
-    if not check_password(pin, request.user.transaction_pin):
-        if request.user.transaction_pin == pin:
-            request.user.transaction_pin = make_password(pin)
-            request.user.save(update_fields=['transaction_pin'])
-        else:
-            return Response({'error': 'Incorrect PIN'}, status=400)
+    """Decline a pending transaction approval without PIN verification."""
     
     try:
         approval = TransactionApproval.objects.select_for_update().get(

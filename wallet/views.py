@@ -6,6 +6,7 @@ from rest_framework.throttling import UserRateThrottle
 from django.contrib.auth import logout, login, authenticate
 from django.contrib.auth.hashers import make_password
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from django.middleware.csrf import get_token
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -49,6 +50,13 @@ from .serializers import (
     SupportedCountrySerializer, LegalDocumentSerializer, ProviderCatalogSerializer,
     UserKYCSubmissionSerializer, OtpChallengeRequestSerializer, OtpChallengeVerifySerializer,
     MerchantLoginOtpVerifySerializer, LoginConfirmationSerializer
+)
+from .services.merchants import (
+    decrypt_merchant_secret,
+    ensure_sandbox_wallet,
+    generate_merchant_api_keys,
+    merchant_code,
+    merchant_public_identifier,
 )
 from django.utils.text import slugify
 from decimal import Decimal
@@ -702,7 +710,10 @@ class GoogleAuthView(APIView):
 @ensure_csrf_cookie
 def csrf_cookie_view(request):
     """Set a CSRF cookie for browser-based API requests."""
-    return Response({'detail': 'CSRF cookie set'}, status=status.HTTP_200_OK)
+    return Response(
+        {'detail': 'CSRF cookie set', 'csrf_token': get_token(request)},
+        status=status.HTTP_200_OK,
+    )
 
 
 @extend_schema(
@@ -5367,7 +5378,7 @@ def create_merchant_account(request):
                 status=MerchantStatus.PENDING
             )
             merchant_public_identifier(merchant)
-            from .services.merchants import ensure_sandbox_wallet, generate_merchant_api_keys, merchant_public_identifier
+            merchant_code(merchant)
             ensure_sandbox_wallet(merchant)
             sandbox_public, sandbox_secret = generate_merchant_api_keys(merchant, MerchantMode.SANDBOX)
             merchant.sandbox_public_key = sandbox_public
@@ -5415,6 +5426,8 @@ def get_merchant_account(request):
     """
     try:
         merchant = Merchant.objects.get(user=request.user)
+        if not merchant.public_identifier:
+            merchant_public_identifier(merchant)
         if request.method == 'PATCH':
             allowed_fields = ['business_name', 'business_email', 'website_url', 'business_type', 'description', 'contact_email', 'contact_phone', 'address', 'tax_id']
             for field in allowed_fields:
@@ -5531,6 +5544,8 @@ def generate_merchant_qr(request):
     try:
         with transaction.atomic():
             merchant = Merchant.objects.select_for_update().get(user=request.user)
+            if not merchant.public_identifier:
+                merchant_public_identifier(merchant)
 
             if merchant.status != MerchantStatus.ACTIVE:
                 return Response(
@@ -5542,6 +5557,8 @@ def generate_merchant_qr(request):
             payload = {
                 'type': 'merchant_pay',
                 'merchant_id': merchant.id,
+                'merchant_code': merchant_code(merchant),
+                'public_identifier': merchant_public_identifier(merchant),
                 'handle': request.user.handle,
                 'business_name': merchant.business_name,
                 'currency': merchant.wallet.currency
@@ -5556,12 +5573,15 @@ def generate_merchant_qr(request):
             ).hexdigest()
 
             # Generate unique QR code
-            qr_code = f"MERCHANT-{uuid.uuid4().hex[:16].upper()}"
+            qr_code = merchant_code(merchant)
 
             merchant.static_qr_code = qr_code
             merchant.static_qr_payload = payload_json
             merchant.static_qr_signature = signature
             merchant.save()
+            payment_url = request.build_absolute_uri(
+                f'/pay/{merchant_code(merchant)}'
+            ).replace('apis.dsdwallet.com', 'dsdwallet.com')
 
             # Audit log
             AuditLog.objects.create(
@@ -5575,7 +5595,7 @@ def generate_merchant_qr(request):
                     'qr_code': qr_code,
                     'payload': payload_json,
                     'signature': signature,
-                    'encoded': base64.b64encode((payload_json + '|' + signature).encode()).decode()
+                    'encoded': payment_url,
                 },
                 status=status.HTTP_200_OK
             )
@@ -5593,7 +5613,17 @@ def merchant_dashboard(request):
     merchant = Merchant.objects.filter(user=request.user).first()
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
-    transactions = Transaction.objects.filter(recipient=request.user)
+    environment = (request.query_params.get('mode') or request.query_params.get('environment') or MerchantMode.SANDBOX).lower()
+    if environment not in MerchantMode.values:
+        return Response({'error': 'Invalid merchant environment'}, status=status.HTTP_400_BAD_REQUEST)
+    if environment == MerchantMode.LIVE and merchant.status != MerchantStatus.ACTIVE:
+        return Response({'error': 'Live mode is available after merchant approval.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from .services.merchants import get_merchant_wallet
+    from .merchant_views import _merchant_transactions
+    mode = MerchantMode(environment)
+    wallet = get_merchant_wallet(merchant, mode)
+    transactions = _merchant_transactions(merchant, mode)
     completed = transactions.filter(status=TransactionStatus.COMPLETED)
     today = timezone.now() - timedelta(days=1)
     today_completed = completed.filter(created_at__gte=today)
@@ -5602,22 +5632,26 @@ def merchant_dashboard(request):
     merchant_fees = completed.aggregate(total=Sum('merchant_fee_amount'))['total'] or Decimal('0.00')
     gross_received = completed.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
     net_received = gross_received - merchant_fees
-    pending_settlements = merchant.settlements.filter(
-        status__in=[Settlement.Status.PENDING, Settlement.Status.PROCESSING],
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    pending_settlements = (
+        merchant.settlements.filter(
+            status__in=[Settlement.Status.PENDING, Settlement.Status.PROCESSING],
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        if mode == MerchantMode.LIVE else Decimal('0.00')
+    )
     success_rate = (
         today_completed.count() * 100 / attempted_today.count()
         if attempted_today.exists() else 0
     )
     recent = completed.order_by('-created_at')[:10]
-    return Response({'merchant': MerchantSerializer(merchant).data, 'today_volume': str(volume),
+    return Response({'merchant': MerchantSerializer(merchant).data, 'environment': environment,
+                     'mode': environment, 'today_volume': str(volume),
                      'success_rate': round(success_rate, 2),
                      'transaction_count': completed.count(),
                      'gross_received': str(gross_received),
                      'merchant_fees': str(merchant_fees),
                      'net_received': str(net_received),
                      'pending_settlements': str(pending_settlements),
-                     'available_balance': str(merchant.wallet.get_balance()),
+                     'available_balance': str(wallet.get_balance()),
                      'plan_usage': merchant_monthly_usage(merchant),
                      'transactions': list(recent.values(
                          'id', 'amount', 'fee_amount', 'merchant_fee_amount', 'currency',
@@ -5628,7 +5662,7 @@ def merchant_dashboard(request):
                      'settlements': list(merchant.settlements.values(
                          'id', 'amount', 'fees', 'currency', 'batch_reference', 'status',
                          'destination', 'created_at', 'completed_at',
-                     ))})
+                     )) if mode == MerchantMode.LIVE else []})
 
 
 @api_view(['GET', 'POST'])
@@ -5651,11 +5685,9 @@ def merchant_kyc_documents(request):
     return Response(list(merchant.kyc_documents.values('id', 'document_type', 'status', 'reviewer_notes', 'file_url', 'created_at')))
 
 
-@api_view(['POST'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def merchant_credentials(request):
-    from wallet.services.merchants import generate_merchant_api_keys
-
     merchant = Merchant.objects.filter(user=request.user).first()
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -5665,6 +5697,17 @@ def merchant_credentials(request):
     if environment == 'live' and merchant.status != MerchantStatus.ACTIVE:
         return Response({'error': 'Live credentials require an approved merchant account'}, status=status.HTTP_403_FORBIDDEN)
     mode = MerchantMode.LIVE if environment == 'live' else MerchantMode.SANDBOX
+    if request.method == 'GET':
+        api_key = merchant.api_keys.filter(mode=mode, is_active=True).first()
+        if not api_key:
+            return Response({'error': 'Credentials have not been issued for this environment.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'environment': environment,
+            'public_key': api_key.public_key,
+            'secret_key': decrypt_merchant_secret(api_key),
+            'secret_key_available': bool(api_key.secret_key_encrypted),
+            'created_at': api_key.created_at,
+        })
     try:
         public_key, secret_key = generate_merchant_api_keys(merchant, mode)
     except ValueError as exc:

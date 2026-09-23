@@ -33,8 +33,20 @@ def getenv_list(key: str, default):
 
 # Django Configuration
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-local-development-only')
+API_ENVELOPE_KEY = os.getenv('API_ENVELOPE_KEY', '')
+API_ENVELOPE_TIMESTAMP_TOLERANCE = int(
+    os.getenv('API_ENVELOPE_TIMESTAMP_TOLERANCE', '300')
+)
 DEBUG = getenv_bool('DEBUG', False)
-ALLOWED_HOSTS = ['178.128.156.225', 'localhost', '127.0.0.1', 'backend.p-space.ai']
+ALLOWED_HOSTS = [
+    '178.128.156.225',
+    'localhost',
+    '127.0.0.1',
+    'backend.p-space.ai',
+    'apis.dsdwallet.com',
+    'dsdwallet.com',
+    'www.dsdwallet.com',
+]
 
 # CORS Configuration
 FRONTEND_ORIGIN = os.getenv('FRONTEND_ORIGIN', 'http://178.128.156.225')
@@ -54,7 +66,7 @@ API_ACCESS_TOKEN_MAX_AGE = int(os.getenv('API_ACCESS_TOKEN_MAX_AGE', '28800'))
 # CSRF Configuration
 CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', False)
 CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
-CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = getenv_bool('CSRF_COOKIE_HTTPONLY', False)
 CSRF_TRUSTED_ORIGINS = getenv_list(
     'CSRF_TRUSTED_ORIGINS',
     [
@@ -97,6 +109,7 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'wallet.middleware.ApiEnvelopeMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -270,7 +283,7 @@ SESSION_REFRESH_AT_REQUEST = True  # Refresh session on each activity
 # CSRF configuration
 CSRF_COOKIE_SECURE = getenv_bool('CSRF_COOKIE_SECURE', False)
 CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
-CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = getenv_bool('CSRF_COOKIE_HTTPONLY', False)
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(
     getenv_list('CSRF_TRUSTED_ORIGINS', [])
     + [
@@ -325,6 +338,9 @@ CELERY_TASK_EAGER_PROPAGATES = True
 
 # Exchange rates (exchangerate.fun)
 EXCHANGE_RATE_API_URL = os.getenv('EXCHANGE_RATE_API_URL', 'https://api.exchangerate.fun/latest')
+EXCHANGE_RATE_FALLBACK_URL = os.getenv(
+    'EXCHANGE_RATE_FALLBACK_URL', 'https://api.frankfurter.app/latest'
+)
 EXCHANGE_RATE_API_TIMEOUT = int(os.getenv('EXCHANGE_RATE_API_TIMEOUT', '15'))
 EXCHANGE_RATE_EXTRA_CURRENCIES = getenv_list(
     'EXCHANGE_RATE_EXTRA_CURRENCIES',

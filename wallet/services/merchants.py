@@ -1,8 +1,14 @@
 import secrets
 import re
+import base64
+import hashlib
+import os
 
 from django.contrib.auth.hashers import make_password
+from django.conf import settings
 from django.db import transaction
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from wallet.models import Merchant, MerchantApiKey, MerchantMode, MerchantStatus, User, Wallet, WalletStatus
 
@@ -22,8 +28,50 @@ def merchant_public_identifier(merchant):
     return candidate
 
 
+def merchant_code(merchant):
+    """Return a random, stable six-digit code for manual and QR payments."""
+    if merchant.merchant_code:
+        return merchant.merchant_code
+    while True:
+        candidate = f'{secrets.randbelow(1_000_000):06d}'
+        if not Merchant.objects.filter(merchant_code=candidate).exists():
+            merchant.merchant_code = candidate
+            merchant.save(update_fields=['merchant_code', 'updated_at'])
+            return candidate
+
+
 def _key_prefix(mode):
     return 'live' if mode == MerchantMode.LIVE else 'test'
+
+
+def _legacy_secret_cipher():
+    key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest())
+    return Fernet(key)
+
+
+def _secret_key():
+    return hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+
+
+def _encrypt_secret(value):
+    nonce = os.urandom(12)
+    encrypted = AESGCM(_secret_key()).encrypt(nonce, value.encode(), None)
+    return 'aesgcm:v1:' + base64.urlsafe_b64encode(nonce + encrypted).decode()
+
+
+def decrypt_merchant_secret(api_key):
+    if not api_key.secret_key_encrypted:
+        return None
+    stored = api_key.secret_key_encrypted
+    if stored.startswith('aesgcm:v1:'):
+        payload = base64.urlsafe_b64decode(stored[len('aesgcm:v1:'):])
+        return AESGCM(_secret_key()).decrypt(payload[:12], payload[12:], None).decode()
+    # Existing keys were encrypted with Fernet; retain read compatibility so
+    # rotating the application does not invalidate issued merchant secrets.
+    try:
+        return _legacy_secret_cipher().decrypt(stored.encode()).decode()
+    except InvalidToken:
+        raise ValueError('Stored merchant secret could not be decrypted') from None
 
 
 def generate_merchant_api_keys(merchant, mode):
@@ -46,6 +94,7 @@ def generate_merchant_api_keys(merchant, mode):
                 'public_key': public_key,
                 'secret_key_prefix': secret_key_prefix,
                 'secret_key_hash': make_password(secret_key),
+                'secret_key_encrypted': _encrypt_secret(secret_key),
                 'is_active': True,
             },
         )

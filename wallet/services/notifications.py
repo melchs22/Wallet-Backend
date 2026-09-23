@@ -36,6 +36,7 @@ def create_notification_record(user, notification_type, payload):
             'transfer_received': 'Money received',
             'incoming_transfer': 'Incoming transfer',
         'payment_request_paid': 'Payment request paid',
+        'payment_sent': 'Payment sent',
         'payment_request_expired': 'Payment request expired',
         'device_signed_in_elsewhere': 'Security notice',
         'new_device_login': 'Approve new device sign-in',
@@ -70,6 +71,12 @@ def _notification_message(notification_type, payload):
         return f"{payload.get('payer_display_name', 'The payer')} declined your request for {amount} {currency}."
     if notification_type == 'payment_request_expired':
         return f"Your request for {amount} {currency} expired. Send a new request if you still need payment."
+    if notification_type == 'payment_sent':
+        return (
+            f"You paid {amount} {currency} to {payload.get('recipient_display_name', 'the merchant')} "
+            f"with a fee of {payload.get('fee_amount', '0.00')} {currency}. "
+            f"Your balance is {payload.get('balance_after', '0.00')} {currency}."
+        )
     if notification_type == 'device_signed_in_elsewhere':
         return f"A new device signed in to your wallet. Please verify your account if this was not you."
     if notification_type == 'new_device_login':
@@ -127,6 +134,13 @@ def _localized_notification_content(notification_type, payload, language_code):
         return ('Demande expirée', f'Votre demande de {amount} {currency} a expiré.')
     if notification_type == 'payment_request_paid':
         return ('Demande payée', f'Votre demande de {amount} {currency} a été payée.')
+    if notification_type == 'payment_sent':
+        return (
+            'Paiement envoyé',
+            f'Vous avez payé {amount} {currency} à {payload.get("recipient_display_name", "le commerçant")}, '
+            f'avec des frais de {payload.get("fee_amount", "0.00")} {currency}. '
+            f'Solde : {payload.get("balance_after", "0.00")} {currency}.',
+        )
     if notification_type == 'new_device_login':
         return ('Nouveau appareil', f'Approuvez la connexion depuis {payload.get("new_device_name", "un nouvel appareil")}.')
     if notification_type == 'device_signed_in_elsewhere':
@@ -189,7 +203,6 @@ def remove_expired_approval_notifications(user=None):
     ).values_list('id', flat=True))
     notifications = Notification.objects.filter(
         type__in=['transfer_approval_requested', 'payment_request_received', 'split_request_received'],
-        read_at__isnull=True,
         payload__approval_id__in=expired_ids,
     )
     if user is not None:
@@ -218,8 +231,16 @@ def _send_push(notification):
                 logger.error('firebase_credentials_invalid')
                 return
         else:
-            local_credential_path = Path(__file__).resolve().parents[2] / 'dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json'
-            if not local_credential_path.exists():
+            credential_candidates = [
+                Path(os.getenv('FIREBASE_SERVICE_ACCOUNT_FILE', '')),
+                Path('/opt/wallet-backend/secrets/firebase-service-account.json'),
+                Path(__file__).resolve().parents[2] / 'dsd-wallet-firebase-adminsdk-fbsvc-457d21a5b0.json',
+            ]
+            local_credential_path = next(
+                (path for path in credential_candidates if str(path) != '.' and path.exists()),
+                None,
+            )
+            if local_credential_path is None:
                 logger.warning('firebase_credentials_not_configured')
                 return
             try:
@@ -247,6 +268,10 @@ def _send_push(notification):
     if target_device_id:
         devices = devices.filter(device_id=target_device_id)
     if not devices.exists():
+        logger.warning(
+            'notification_no_active_devices',
+            extra={'notification_id': notification.id, 'user_id': notification.user_id},
+        )
         return
     data = {key: str(value) for key, value in payload.items() if value is not None}
     devices_by_language = {}
@@ -266,8 +291,29 @@ def _send_push(notification):
                     aps=messaging.Aps(sound='default', badge=1),
                 ),
             ),
-        ),
-        response = messaging.send_each_for_multicast(message)
+        )
+        try:
+            response = messaging.send_each_for_multicast(message)
+        except Exception:
+            logger.exception(
+                'firebase_multicast_send_failed',
+                extra={
+                    'notification_id': notification.id,
+                    'user_id': notification.user_id,
+                    'platforms': [device.platform for device in language_devices],
+                },
+            )
+            continue
+        logger.info(
+            'firebase_multicast_send_complete',
+            extra={
+                'notification_id': notification.id,
+                'user_id': notification.user_id,
+                'language': language,
+                'success_count': response.success_count,
+                'failure_count': response.failure_count,
+            },
+        )
         for device, result in zip(language_devices, response.responses):
             if not result.success and (
                 'registration-token-not-registered' in str(result.exception)
@@ -275,6 +321,16 @@ def _send_push(notification):
             ):
                 device.active = False
                 device.save(update_fields=['active'])
+            elif not result.success:
+                logger.warning(
+                    'firebase_device_send_failed',
+                    extra={
+                        'notification_id': notification.id,
+                        'device_id': device.id,
+                        'platform': device.platform,
+                        'error': str(result.exception),
+                    },
+                )
 
 
 def broadcast_notification(notification_type, payload, user_ids=None):
