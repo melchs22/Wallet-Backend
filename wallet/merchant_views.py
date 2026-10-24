@@ -1,11 +1,11 @@
 import csv
 import logging
-import secrets
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.core import signing
 from rest_framework import exceptions, status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes, parser_classes
@@ -87,6 +87,11 @@ def _team_context(request):
     return member.merchant, member.role
 
 
+def _workspace_merchant(request):
+    merchant, _ = _team_context(request)
+    return merchant
+
+
 def _team_can(role, action):
     return role == MerchantTeamRole.OWNER or (
         role == MerchantTeamRole.ADMIN and action in {'invite', 'update', 'remove', 'list'}
@@ -134,15 +139,11 @@ def merchant_team(request):
         return Response({'error': 'A valid email is required.'}, status=status.HTTP_400_BAD_REQUEST)
     if not full_name:
         return Response({'error': 'The invitee name is required.'}, status=status.HTTP_400_BAD_REQUEST)
-    if not phone_number:
-        return Response({'error': 'The invitee phone number is required.'}, status=status.HTTP_400_BAD_REQUEST)
     if member_role == MerchantTeamRole.OWNER or member_role not in MerchantTeamRole.values:
         return Response({'error': 'Invalid team role.'}, status=status.HTTP_400_BAD_REQUEST)
     from wallet.models import User
     user = User.objects.filter(email__iexact=email).first()
-    temporary_password = None
     if user is None:
-        temporary_password = secrets.token_urlsafe(12)
         local_part = email.split('@', 1)[0]
         handle = ''.join(c for c in local_part.lower() if c.isalnum() or c == '_')[:45] or 'team'
         base_handle = handle
@@ -151,18 +152,29 @@ def merchant_team(request):
             handle = f'{base_handle}{suffix}'
             suffix += 1
         user = User.objects.create_user(
-            email=email, password=temporary_password, handle=handle,
+            email=email, handle=handle,
             display_name=full_name, primary_phone_number=phone_number, must_change_password=True,
         )
     else:
         user.display_name = full_name
+        user.must_change_password = True
         if phone_number and not user.primary_phone_number:
             user.primary_phone_number = phone_number
-            user.save(update_fields=['display_name', 'primary_phone_number'])
+            user.save(update_fields=['display_name', 'primary_phone_number', 'must_change_password'])
+        else:
+            user.save(update_fields=['display_name', 'must_change_password'])
     member, created = MerchantTeamMember.objects.update_or_create(
         merchant=merchant, email=email,
         defaults={'user': user, 'full_name': full_name, 'phone_number': phone_number,
                   'role': member_role, 'is_active': True, 'invited_by': request.user},
+    )
+    invite_token = signing.dumps(
+        {'member_id': member.id, 'user_id': user.pk, 'email': email},
+        salt='wallet-team-invite',
+    )
+    invite_url = (
+        f'{getattr(settings, "FRONTEND_ORIGIN", "https://dsdwallet.com")}'
+        f'/auth/team-invite?token={invite_token}'
     )
     payload = {'id': member.id, 'email': member.email, 'user_id': member.user_id,
                'full_name': member.full_name, 'phone_number': member.phone_number,
@@ -170,37 +182,32 @@ def merchant_team(request):
                'is_active': member.is_active, 'accepted_at': member.accepted_at,
                'invitation': {
                    'email': email, 'role': member.role,
-                   'login_url': request.build_absolute_uri('/api/auth/login'),
+                   'login_url': invite_url,
                    'whatsapp_text': (
                        f'Hello {member.full_name}, you have been invited to join '
                        f'{merchant.business_name} as {member.role}. '
                        f'Login email: {email}. '
-                       f'Login identifier: {email}. '
-                       f'Login here: {request.build_absolute_uri("/login")}.'
+                       f'Set your password and join DSD PAY: {invite_url}.'
                    ),
                }}
-    if temporary_password:
-        payload['invitation']['temporary_password'] = temporary_password
-        payload['invitation']['whatsapp_text'] += (
-            f' Login email: {email}. Temporary password: {temporary_password}. '
-            'Change it after your first login.'
-        )
-        payload['invitation']['login_identifier'] = email
-        payload['invitation']['temporary_password'] = temporary_password
-        member.credentials_issued_at = timezone.now()
-        member.save(update_fields=['credentials_issued_at'])
-    delivery = send_multiwa_text(
-        phone_number,
-        payload['invitation']['whatsapp_text'],
-        log_context={'merchant_id': merchant.id, 'team_member_id': member.id},
+    member.credentials_issued_at = timezone.now()
+    member.save(update_fields=['credentials_issued_at'])
+    from wallet.services.email import branded_email, send_email
+    email_title = f'You have been invited to {merchant.business_name} on DSD PAY'
+    email_body = (
+        f'<p>Hello {member.full_name},</p>'
+        f'<p>You have been invited to join <strong>{merchant.business_name}</strong> '
+        f'as {member.role}.</p><p>Your sign-in email is <strong>{email}</strong>.</p>'
+        '<p>Use the secure link below to set your password and activate your team access.</p>'
     )
-    payload['invitation']['delivery_status'] = delivery.get('status')
-    if delivery.get('status') != 'sent':
+    delivery_ok = send_email(email, email_title, branded_email(email_title, email_body, invite_url, 'Set your password'))
+    payload['invitation']['delivery_status'] = 'sent' if delivery_ok else 'failed'
+    if not delivery_ok:
         return Response(
             {
                 'error': 'The team member was saved, but we could not send the invitation message.',
                 'member': payload,
-                'delivery_status': delivery.get('status'),
+                'delivery_status': 'failed',
             },
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
@@ -431,7 +438,8 @@ def _session_merchant_mode(request):
     mode = (request.query_params.get('mode') or request.query_params.get('environment') or 'sandbox').lower()
     if mode not in ('sandbox', 'live'):
         raise ValueError('Invalid merchant environment')
-    if mode == 'live' and request.user.merchant_account.status != 'active':
+    merchant = _workspace_merchant(request)
+    if mode == 'live' and merchant.status != 'active':
         raise PermissionError('Live mode is available after merchant approval.')
     return mode
 
@@ -441,9 +449,10 @@ def _session_merchant_mode(request):
 @permission_classes([IsAuthenticated])
 def merchant_session_transactions(request):
     """Dashboard-only transaction access using the merchant user session."""
-    merchant = getattr(request.user, 'merchant_account', None)
-    if merchant is None:
-        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        merchant = _workspace_merchant(request)
+    except exceptions.APIException as exc:
+        return Response({'error': str(exc.detail)}, status=exc.status_code)
     try:
         mode = _session_merchant_mode(request)
     except ValueError as exc:
@@ -459,9 +468,10 @@ def merchant_session_transactions(request):
 @authentication_classes([SignedTokenAuthentication, SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def merchant_session_transaction_detail(request, transaction_id):
-    merchant = getattr(request.user, 'merchant_account', None)
-    if merchant is None:
-        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        merchant = _workspace_merchant(request)
+    except exceptions.APIException as exc:
+        return Response({'error': str(exc.detail)}, status=exc.status_code)
     try:
         mode = _session_merchant_mode(request)
         transaction_obj = _merchant_transactions(merchant, mode).get(pk=transaction_id)
@@ -477,9 +487,10 @@ def merchant_session_transaction_detail(request, transaction_id):
 @permission_classes([IsAuthenticated])
 def merchant_session_limits(request):
     """Dashboard-only limits using the merchant user session."""
-    merchant = getattr(request.user, 'merchant_account', None)
-    if merchant is None:
-        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        merchant = _workspace_merchant(request)
+    except exceptions.APIException as exc:
+        return Response({'error': str(exc.detail)}, status=exc.status_code)
     currency = (request.query_params.get('currency') or merchant.wallet.currency or 'GNF').upper()
     snapshot = merchant_limit_snapshot(merchant, currency)
     return Response({
@@ -492,9 +503,10 @@ def merchant_session_limits(request):
 @authentication_classes([SignedTokenAuthentication, SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def merchant_session_settlements(request):
-    merchant = getattr(request.user, 'merchant_account', None)
-    if merchant is None:
-        return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        merchant = _workspace_merchant(request)
+    except exceptions.APIException as exc:
+        return Response({'error': str(exc.detail)}, status=exc.status_code)
     try:
         mode = _session_merchant_mode(request)
     except ValueError as exc:
@@ -764,6 +776,14 @@ def merchant_settings(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def merchant_public_profile(request, identifier):
+    if getattr(settings, 'RECAPTCHA_SECRET_KEY', '') and (
+        request.query_params.get('captcha_token') or request.META.get('HTTP_ORIGIN')
+    ):
+        from wallet.services.recaptcha import should_require_recaptcha, verify_recaptcha
+        if not should_require_recaptcha(request):
+            return Response({'error': 'Invalid security check context.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not verify_recaptcha(request.query_params.get('captcha_token'), request.META.get('REMOTE_ADDR')):
+            return Response({'error': 'Please complete the security check and try again.'}, status=status.HTTP_400_BAD_REQUEST)
     merchant = _active_public_merchant(identifier)
     if not merchant:
         return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -782,6 +802,14 @@ def merchant_public_profile(request, identifier):
 @permission_classes([AllowAny])
 def merchant_payment_prompt(request, identifier):
     """Create a normal wallet payment request so app approval/realtime flows remain intact."""
+    if getattr(settings, 'RECAPTCHA_SECRET_KEY', '') and (
+        request.data.get('captcha_token') or request.META.get('HTTP_ORIGIN')
+    ):
+        from wallet.services.recaptcha import should_require_recaptcha, verify_recaptcha
+        if not should_require_recaptcha(request):
+            return Response({'error': 'Invalid security check context.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not verify_recaptcha(request.data.get('captcha_token'), request.META.get('REMOTE_ADDR')):
+            return Response({'error': 'Please complete the security check and try again.'}, status=status.HTTP_400_BAD_REQUEST)
     merchant = _active_public_merchant(identifier)
     if not merchant:
         return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)

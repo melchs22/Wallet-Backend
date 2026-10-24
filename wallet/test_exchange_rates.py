@@ -3,8 +3,11 @@ from unittest.mock import MagicMock, patch
 
 import requests
 from django.test import TestCase, override_settings
+from django.urls import reverse
+from rest_framework.test import APIClient
 
 from wallet.models import ExchangeRate, SupportedCountry, Wallet
+from wallet.serializers import ExchangeRateSerializer
 from wallet.services.exchange_rates import (
     fetch_latest_rates,
     get_active_exchange_rate,
@@ -117,6 +120,52 @@ class ExchangeRateServiceTestCase(TestCase):
         refresh_exchange_rates(base_currencies=['EUR'], target_currencies=['USD', 'EUR', 'GBP'])
         self.assertTrue(ExchangeRate.objects.filter(from_currency='EUR', to_currency='USD').exists())
         mock_fetch.assert_called()
+
+    def test_exchange_rate_serializer_exposes_legacy_and_alias_fields(self):
+        rate = ExchangeRate.objects.create(
+            from_currency='USD',
+            to_currency='EUR',
+            rate=Decimal('0.86'),
+            source='test',
+            valid_from='2026-01-01T00:00:00Z',
+        )
+
+        payload = ExchangeRateSerializer(rate).data
+
+        self.assertEqual(payload['from_currency'], 'USD')
+        self.assertEqual(payload['to_currency'], 'EUR')
+        self.assertEqual(payload['base_currency'], 'USD')
+        self.assertEqual(payload['quote_currency'], 'EUR')
+
+    def test_admin_exchange_rates_endpoint_exposes_compatibility_aliases(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        admin = User.objects.create_superuser(
+            email='admin@example.com',
+            password='StrongPass123!',
+            handle='finance-admin',
+            display_name='Finance Admin',
+        )
+
+        ExchangeRate.objects.create(
+            from_currency='USD',
+            to_currency='EUR',
+            rate=Decimal('0.86'),
+            source='test',
+            valid_from='2026-01-01T00:00:00Z',
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        response = client.get(reverse('admin_exchange_rates_list'))
+
+        self.assertEqual(response.status_code, 200)
+        rate = response.json()['exchange_rates'][0]
+        self.assertEqual(rate['from_currency'], 'USD')
+        self.assertEqual(rate['to_currency'], 'EUR')
+        self.assertEqual(rate['base_currency'], 'USD')
+        self.assertEqual(rate['quote_currency'], 'EUR')
 
     def test_active_country_currencies_are_included(self):
         SupportedCountry.objects.create(

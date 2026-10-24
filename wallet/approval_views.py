@@ -85,21 +85,6 @@ def approve_transaction(request, approval_id):
                     idempotency_key=f'transfer-approval-{approval.id}',
                 )
                 approval.transaction = transaction_obj
-                
-                # Notify recipient that transfer completed
-                from .views import create_notification
-                create_notification(
-                    recipient,
-                    'transfer_received',
-                    {
-                        'sender_handle': approval.approver.handle,
-                        'sender_display_name': approval.approver.display_name,
-                        'amount': str(approval.amount),
-                        'currency': approval.currency,
-                        'note': approval.note,
-                        'transaction_id': str(transaction_obj.id),
-                    },
-                )
             except Exception as e:
                 return Response({'error': str(e)}, status=400)
         approval.status = TransactionApproval.ApprovalStatus.APPROVED
@@ -150,21 +135,6 @@ def approve_transaction(request, approval_id):
                     idempotency_key=f'qr-approval-{approval.id}',
                 )
                 approval.transaction = transaction_obj
-                
-                # Notify recipient that QR payment completed
-                from .views import create_notification
-                create_notification(
-                    recipient,
-                    'qr_payment_received',
-                    {
-                        'payer_handle': approval.approver.handle,
-                        'payer_display_name': approval.approver.display_name,
-                        'amount': str(approval.amount),
-                        'currency': approval.currency,
-                        'note': approval.note,
-                        'transaction_id': str(transaction_obj.id),
-                    },
-                )
             except Exception as e:
                 return Response({'error': str(e)}, status=400)
         approval.status = TransactionApproval.ApprovalStatus.APPROVED
@@ -198,20 +168,6 @@ def approve_transaction(request, approval_id):
             payment_request.resulting_transaction = transaction_obj
             payment_request.save(update_fields=['status', 'resulting_transaction'])
             approval.transaction = transaction_obj
-            from .views import create_notification
-            create_notification(
-                approval.approver,
-                'payment_sent',
-                {
-                    'amount': str(transaction_obj.amount),
-                    'currency': transaction_obj.currency,
-                    'fee_amount': str(transaction_obj.fee_amount),
-                    'balance_after': str(approval.approver.wallet.get_balance()),
-                    'recipient_display_name': approval.requester.display_name,
-                    'recipient_handle': approval.requester.handle,
-                    'transaction_id': str(transaction_obj.id),
-                },
-            )
         elif approval.split_request:
             participant = SplitParticipant.objects.select_related('payment_request').filter(
                 split_request=approval.split_request,

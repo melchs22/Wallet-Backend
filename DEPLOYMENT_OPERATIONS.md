@@ -356,3 +356,223 @@ curl -i -X OPTIONS https://apis.dsdwallet.com/api/me \
 ```
 
 The response must include `access-control-allow-origin: https://dsdwallet.com` and `access-control-allow-credentials: true`.
+
+## Normal local-to-server deployment workflow
+
+This section documents the manual deployment procedure used when the changes are
+being made in the local checkouts rather than deployed through GitHub Actions.
+Run these commands from the developer computer. Do not copy local `.env` files,
+Firebase credentials, virtual environments, `node_modules`, build caches, or
+database files to the server.
+
+### 1. Set the connection variables
+
+```bash
+export DEPLOY_KEY="/Users/tutumelchizedek/Documents/aws/Tutu.pem"
+export DEPLOY_HOST="ec2-user@51.21.180.12"
+export BACKEND_LOCAL="/Users/tutumelchizedek/Downloads/Wallet-Backend"
+export FRONTEND_LOCAL="/Users/tutumelchizedek/Downloads/dsd-wallet"
+export BACKEND_REMOTE="/opt/wallet-backend"
+export FRONTEND_REMOTE="/opt/dsd-wallet"
+```
+
+Verify SSH access before transferring files:
+
+```bash
+ssh -i "$DEPLOY_KEY" -o ConnectTimeout=20 "$DEPLOY_HOST" \
+  'hostname && systemctl is-active wallet-web dsd-wallet'
+```
+
+### 2. Validate locally before copying
+
+Backend:
+
+```bash
+cd "$BACKEND_LOCAL"
+python3 -m py_compile wallet/admin_views.py wallet/urls.py
+```
+
+Frontend:
+
+```bash
+cd "$FRONTEND_LOCAL"
+npm ci
+npm run build -- --webpack
+```
+
+Use the smallest relevant test command when the project provides a targeted
+test. For a backend configuration check with the local environment available:
+
+```bash
+cd "$BACKEND_LOCAL"
+python3 manage.py check
+```
+
+### 3. Copy the backend to the server
+
+For a complete source update, synchronize the backend while preserving the
+server environment, secrets, database, backups, and Python cache:
+
+```bash
+rsync -az --delete \
+  --exclude='.git' \
+  --exclude='.env' \
+  --exclude='db.sqlite3' \
+  --exclude='backups/' \
+  --exclude='secrets/' \
+  --exclude='.venv/' \
+  --exclude='__pycache__/' \
+  -e "ssh -i $DEPLOY_KEY" \
+  "$BACKEND_LOCAL/" "$DEPLOY_HOST:$BACKEND_REMOTE/"
+```
+
+For a small surgical change, copy only the changed files. This is safer when
+the server has local-only files or when a full source transfer is unnecessary:
+
+```bash
+scp -i "$DEPLOY_KEY" \
+  "$BACKEND_LOCAL/wallet/admin_views.py" \
+  "$BACKEND_LOCAL/wallet/urls.py" \
+  "$DEPLOY_HOST:/tmp/"
+
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" \
+  "cp /tmp/admin_views.py $BACKEND_REMOTE/wallet/admin_views.py && \
+   cp /tmp/urls.py $BACKEND_REMOTE/wallet/urls.py"
+```
+
+After copying backend files, validate and restart:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" "
+  set -e
+  cd '$BACKEND_REMOTE'
+  .venv/bin/python manage.py check
+  sudo systemctl restart wallet-web wallet-celery wallet-celery-beat
+  systemctl is-active wallet-web wallet-celery wallet-celery-beat
+"
+```
+
+Run migrations only when the change includes new or altered migrations. Load
+the server environment so Django uses the same database credentials as the
+systemd service:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" "
+  set -e
+  cd '$BACKEND_REMOTE'
+  set -a; source .env; set +a
+  .venv/bin/python manage.py migrate --noinput
+"
+```
+
+If a direct migration command reports a PostgreSQL password error, stop and
+inspect the service environment rather than changing the database password
+blindly. The command must use the same `DATABASE_URL` or database variables as
+`wallet-web`.
+
+### 4. Copy and build the merchant frontend
+
+The merchant and customer frontend is the Next.js application in
+`/Users/tutumelchizedek/Downloads/dsd-wallet`. Copy source files without
+overwriting the server's production environment:
+
+```bash
+rsync -az --delete \
+  --exclude='.git' \
+  --exclude='.env*' \
+  --exclude='node_modules/' \
+  --exclude='.next/' \
+  -e "ssh -i $DEPLOY_KEY" \
+  "$FRONTEND_LOCAL/" "$DEPLOY_HOST:$FRONTEND_REMOTE/"
+```
+
+Build and restart it on the server:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" "
+  set -e
+  cd '$FRONTEND_REMOTE'
+  npm ci
+  npm run build -- --webpack
+  sudo systemctl restart dsd-wallet
+  systemctl is-active dsd-wallet
+"
+```
+
+The production frontend environment remains on the server at
+`/opt/dsd-wallet/.env.production`. Changes to `NEXT_PUBLIC_*` values require a
+new build because those values are embedded into the browser bundle.
+
+### 5. Verify the deployment
+
+Check every application service:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" \
+  'systemctl is-active nginx dsd-wallet wallet-web wallet-celery wallet-celery-beat'
+```
+
+Check public routes:
+
+```bash
+curl -fsS -o /dev/null -w 'frontend: %{http_code}\n' \
+  https://dsdwallet.com/
+curl -fsS -o /dev/null -w 'admin revenue page: %{http_code}\n' \
+  https://dsdwallet.com/admin/fee-revenue
+curl -fsS -o /dev/null -w 'API schema: %{http_code}\n' \
+  https://apis.dsdwallet.com/api/schema/
+```
+
+Admin API routes require an authenticated admin session or bearer token. A
+`401` response without credentials is expected and confirms that the route is
+reachable and protected:
+
+```bash
+curl -sS -o /tmp/admin-revenue.json \
+  -w 'admin fee API without credentials: %{http_code}\n' \
+  'https://apis.dsdwallet.com/api/admin/fee-revenue?time_range=30d'
+```
+
+Review recent errors if any check fails:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" \
+  'sudo journalctl -u wallet-web -u dsd-wallet --no-pager -n 100'
+```
+
+### 6. Rollback guidance
+
+Before a risky deployment, save the current files or record the current
+commit. If the update was deployed from Git:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" "
+  cd '$BACKEND_REMOTE'
+  git log -1 --oneline
+  git status --short
+"
+```
+
+For a source transfer, restore the previous known-good checkout or copy back
+the specific files from the local backup, then restart only the affected
+service:
+
+```bash
+ssh -i "$DEPLOY_KEY" "$DEPLOY_HOST" \
+  'sudo systemctl restart wallet-web dsd-wallet'
+```
+
+Never roll back by deleting `/opt/wallet-backend`, `/opt/dsd-wallet`, the
+database, media, `.env`, or the `secrets/` directory.
+
+### 7. GitHub Actions alternative
+
+Both repositories also contain a GitHub Actions deployment workflow. A push to
+the configured `main` branch runs validation, synchronizes source with
+`rsync`, and invokes the server deployment script. A manual run can be started
+from the repository's Actions tab using `workflow_dispatch`.
+
+The workflows require repository secrets for the deployment host, user, SSH
+private key, and remote application directories. Keep those values in GitHub
+Secrets; do not place them in workflow files or source code. The manual local
+workflow above is preferred for a controlled surgical production fix.

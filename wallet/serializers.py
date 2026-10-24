@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import login
 from django.db import models
 from .models import (
-    User, Wallet, Transaction, LedgerEntry, Notification,
+    User, Wallet, Transaction, LedgerEntry, Notification, UtilityPayment, UtilityService,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant,
@@ -22,7 +22,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'phone_number', 'primary_phone_number', 'handle', 'display_name', 'avatar_url', 'kyc_tier', 'status', 'is_staff', 'must_change_password', 'has_transaction_pin', 'is_child_account', 'is_parent_account']
+        fields = ['id', 'email', 'phone_number', 'primary_phone_number', 'handle', 'display_name', 'avatar_url', 'language_code', 'kyc_tier', 'status', 'is_staff', 'must_change_password', 'has_transaction_pin', 'is_child_account', 'is_parent_account']
         read_only_fields = ['id', 'kyc_tier', 'status', 'is_staff', 'must_change_password']
 
     def get_has_transaction_pin(self, obj):
@@ -64,6 +64,7 @@ class EmailSignupSerializer(serializers.Serializer):
     terms_accepted = serializers.BooleanField(write_only=True)
     country_code = serializers.CharField(required=False, allow_blank=True, max_length=2)
     device_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    language_code = serializers.ChoiceField(choices=['en', 'fr'], required=False, default='en')
 
     def validate(self, attrs):
         if attrs['password'] != attrs['confirm_password']:
@@ -81,6 +82,10 @@ class EmailLoginSerializer(serializers.Serializer):
     device_name = serializers.CharField(required=False, allow_blank=True, max_length=120)
     public_key_pem = serializers.CharField(required=False, allow_blank=True, max_length=4096)
     password = serializers.CharField(write_only=True)
+    captcha_token = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    merchant_login = serializers.BooleanField(required=False, default=False, write_only=True)
+    otp_challenge_id = serializers.UUIDField(required=False, write_only=True)
+    otp_code = serializers.RegexField(regex=r'^\d{6}$', required=False, write_only=True)
 
     def validate(self, attrs):
         if not attrs.get('identifier') and not attrs.get('email'):
@@ -392,7 +397,7 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
     recipient_handle = serializers.SerializerMethodField()
     recipient_display_name = serializers.SerializerMethodField()
     reversal_status = serializers.SerializerMethodField()
-    related_transaction_id = serializers.UUIDField(source='related_transaction.id', allow_null=True)
+    related_transaction_id = serializers.IntegerField(source='related_transaction.id', allow_null=True)
 
     class Meta:
         model = Transaction
@@ -463,9 +468,12 @@ class ExchangeRateSerializer(serializers.ModelSerializer):
     """
     Serializer for exchange rates.
     """
+    base_currency = serializers.CharField(source='from_currency', read_only=True)
+    quote_currency = serializers.CharField(source='to_currency', read_only=True)
+
     class Meta:
         model = ExchangeRate
-        fields = ['id', 'from_currency', 'to_currency', 'rate', 'source', 'valid_from', 'valid_until']
+        fields = ['id', 'from_currency', 'to_currency', 'base_currency', 'quote_currency', 'rate', 'source', 'valid_from', 'valid_until']
         read_only_fields = fields
 
 
@@ -475,6 +483,7 @@ class AdminLoginSerializer(serializers.Serializer):
     """
     username = serializers.CharField(required=True)
     password = serializers.CharField(required=True, write_only=True)
+    totp_code = serializers.CharField(required=False, write_only=True, max_length=8)
 
 
 class AdminChangePasswordSerializer(serializers.Serializer):
@@ -724,7 +733,7 @@ class ScheduledTransferSerializer(serializers.ModelSerializer):
     class Meta:
         model = ScheduledTransfer
         fields = [
-            'id', 'sender', 'recipient', 'recipient_phone', 'amount', 'currency',
+            'id', 'sender', 'recipient', 'recipient_phone', 'name', 'amount', 'currency',
             'frequency', 'next_execution', 'last_execution', 'end_date',
             'total_executions', 'max_executions', 'status', 'note',
             'created_at', 'updated_at'
@@ -737,6 +746,7 @@ class ScheduledTransferCreateSerializer(serializers.Serializer):
     Serializer for creating a scheduled transfer.
     """
     recipient_phone = serializers.CharField(required=True, max_length=30)
+    name = serializers.CharField(required=False, allow_blank=True, max_length=120)
     amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=True)
     currency = serializers.CharField(max_length=3, required=True)
     frequency = serializers.ChoiceField(choices=ScheduleFrequency.choices, required=True)
@@ -744,6 +754,34 @@ class ScheduledTransferCreateSerializer(serializers.Serializer):
     end_date = serializers.DateTimeField(required=False, allow_null=True)
     max_executions = serializers.IntegerField(required=False, allow_null=True)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class ScheduledTransferUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, required=False)
+    frequency = serializers.ChoiceField(choices=ScheduleFrequency.choices, required=False)
+    next_execution = serializers.DateTimeField(required=False)
+    end_date = serializers.DateTimeField(required=False, allow_null=True)
+    max_executions = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class UtilityPaymentSerializer(serializers.ModelSerializer):
+    service_label = serializers.CharField(source='get_service_display', read_only=True)
+
+    class Meta:
+        model = UtilityPayment
+        fields = ['id', 'service', 'service_label', 'account_number', 'amount',
+                  'currency', 'status', 'provider_reference', 'created_at',
+                  'completed_at']
+        read_only_fields = ['id', 'status', 'provider_reference', 'created_at', 'completed_at']
+
+
+class UtilityPaymentCreateSerializer(serializers.Serializer):
+    service = serializers.ChoiceField(choices=UtilityService.choices)
+    account_number = serializers.CharField(max_length=80)
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=Decimal('0.01'))
+    currency = serializers.CharField(max_length=3)
 
 
 class MerchantSerializer(serializers.ModelSerializer):

@@ -12,6 +12,6 @@ wallert app/.flutter-plugins-dependencies
 wallert app/android/.gradle/
 wallert app/android/local.properties
 wallert app/ios/Flutter/ephemeral/
-
+Wallet Admin/node_modules
 # Never commit Firebase Admin private credentials.
 **/*firebase-adminsdk*.json

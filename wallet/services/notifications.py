@@ -7,6 +7,233 @@ from wallet.models import Notification, PushDevice, TransactionApproval, User
 
 logger = logging.getLogger(__name__)
 
+_NOTIFICATION_COPY = {
+    'transfer_approval_requested': (
+        'Transfer approval required',
+        '{sender} wants to send {amount} {currency}.',
+        'Approbation de transfert requise',
+        '{sender} souhaite vous envoyer {amount} {currency}.',
+    ),
+    'payment_request_received': (
+        'Payment request received',
+        '{requester} requested {amount} {currency}.',
+        'Demande de paiement reçue',
+        '{requester} vous demande {amount} {currency}.',
+    ),
+    'split_request_received': (
+        'Split payment requested',
+        '{creator} requested {amount} {currency} as your share of a split payment.',
+        'Paiement partagé demandé',
+        '{creator} vous demande {amount} {currency} pour votre part du paiement partagé.',
+    ),
+    'parental_link_requested': (
+        'Parental link approval required',
+        '{parent} wants to link your account.',
+        'Approbation du lien parental requise',
+        '{parent} souhaite associer votre compte au sien.',
+    ),
+    'money_received': (
+        'Money received',
+        'You received {amount} {currency}.',
+        'Argent reçu',
+        'Vous avez reçu {amount} {currency}.',
+    ),
+    'qr_payment_received': (
+        'QR payment received',
+        'You received {amount} {currency} by QR payment.',
+        'Paiement QR reçu',
+        'Vous avez reçu {amount} {currency} par paiement QR.',
+    ),
+    'transfer_received': (
+        'Money received',
+        'You received {amount} {currency} from {sender}.',
+        'Argent reçu',
+        'Vous avez reçu {amount} {currency} de la part de {sender}.',
+    ),
+    'incoming_transfer': (
+        'Incoming transfer',
+        '{sender} started a transfer of {amount} {currency}.',
+        'Transfert entrant',
+        '{sender} a commencé un transfert de {amount} {currency}.',
+    ),
+    'incoming_qr_payment': (
+        'QR payment pending',
+        '{payer} is preparing a QR payment of {amount} {currency}.',
+        'Paiement QR en attente',
+        '{payer} prépare un paiement QR de {amount} {currency}.',
+    ),
+    'payment_request_declined': (
+        'Payment request declined',
+        '{payer} declined your request for {amount} {currency}.',
+        'Demande de paiement refusée',
+        '{payer} a refusé votre demande de {amount} {currency}.',
+    ),
+    'payment_request_expired': (
+        'Payment request expired',
+        'Your request for {amount} {currency} has expired.',
+        'Demande de paiement expirée',
+        'Votre demande de {amount} {currency} a expiré.',
+    ),
+    'payment_request_paid': (
+        'Payment request paid',
+        '{payer} paid your request for {amount} {currency}.',
+        'Demande de paiement réglée',
+        '{payer} a réglé votre demande de {amount} {currency}.',
+    ),
+    'payment_request_cancelled': (
+        'Payment request cancelled',
+        'A payment request from {requester} has been cancelled.',
+        'Demande de paiement annulée',
+        'Une demande de paiement de {requester} a été annulée.',
+    ),
+    'payment_sent': (
+        'Payment sent',
+        'You paid {amount} {currency} to {recipient} with a fee of {fee_amount} {currency}. '
+        'Your balance is {balance_after} {currency}.',
+        'Paiement envoyé',
+        'Vous avez payé {amount} {currency} à {recipient}, avec des frais de {fee_amount} {currency}. '
+        'Votre solde est de {balance_after} {currency}.',
+    ),
+    'transaction_reversed': (
+        'Transaction reversed',
+        '{message}',
+        'Transaction annulée',
+        '{message_fr}',
+    ),
+    'utility_payment_completed': (
+        'Utility payment completed',
+        'Your {service} payment of {amount} {currency} was completed.',
+        'Paiement de facture terminé',
+        'Votre paiement {service} de {amount} {currency} a été effectué.',
+    ),
+    'device_signed_in_elsewhere': (
+        'Security notice',
+        'A new device signed in to your wallet. If this was not you, review your security settings.',
+        'Alerte de sécurité',
+        'Un nouvel appareil s’est connecté à votre portefeuille. Si ce n’était pas vous, vérifiez vos paramètres de sécurité.',
+    ),
+    'new_device_login': (
+        'Approve new device sign-in',
+        'Approve sign-in from {device}.',
+        'Connexion sur un nouvel appareil',
+        'Approuvez la connexion depuis {device}.',
+    ),
+    'device_revoked': (
+        'Device signed out',
+        'This device was signed out remotely.',
+        'Appareil déconnecté',
+        'Cet appareil a été déconnecté à distance.',
+    ),
+    'mobile_money_withdrawal': (
+        'Transfer submitted',
+        'Your transfer of {amount} {currency} to {destination} was submitted.',
+        'Transfert soumis',
+        'Votre transfert de {amount} {currency} vers {destination} a été soumis.',
+    ),
+    'mobile_money_transaction_completed': (
+        'Mobile money transaction completed',
+        'Your mobile money transaction of {amount} {currency} was completed.',
+        'Opération mobile money terminée',
+        'Votre opération mobile money de {amount} {currency} est terminée.',
+    ),
+    'mobile_money_transaction_failed': (
+        'Mobile money transaction failed',
+        'Your mobile money transaction of {amount} {currency} could not be completed.',
+        'Échec de l’opération mobile money',
+        'Votre opération mobile money de {amount} {currency} n’a pas pu être effectuée.',
+    ),
+    'merchant_withdrawal_completed': (
+        'Merchant withdrawal completed',
+        'Your bank withdrawal of {amount} {currency} was completed.',
+        'Retrait bancaire du commerçant terminé',
+        'Votre retrait bancaire de {amount} {currency} est terminé.',
+    ),
+    'merchant_payment_received': (
+        'Merchant payment received',
+        'You received a payment of {amount} {currency} from {payer}.',
+        'Paiement commerçant reçu',
+        'Vous avez reçu un paiement de {amount} {currency} de la part de {payer}.',
+    ),
+    'scheduled_transfer_failed': (
+        'Scheduled transfer failed',
+        'Your scheduled transfer of {amount} {currency} could not be completed. Check your balance and try again.',
+        'Échec du transfert programmé',
+        'Votre transfert programmé de {amount} {currency} n’a pas pu être effectué. Vérifiez votre solde et réessayez.',
+    ),
+    'parental_link_approved': (
+        'Parental link approved',
+        '{child} approved the parental link.',
+        'Lien parental approuvé',
+        '{child} a approuvé le lien parental.',
+    ),
+    'parental_link_declined': (
+        'Parental link declined',
+        '{child} declined the parental link.',
+        'Lien parental refusé',
+        '{child} a refusé le lien parental.',
+    ),
+    'wallet_topup': (
+        'Wallet credited',
+        'Your wallet was credited with {amount} {currency}.',
+        'Portefeuille crédité',
+        'Votre portefeuille a été crédité de {amount} {currency}.',
+    ),
+    'dispute_resolved': (
+        'Dispute resolved',
+        'Your dispute was {resolution}. Open the dispute for details.',
+        'Litige résolu',
+        'Votre litige a été {resolution}. Ouvrez le litige pour consulter les détails.',
+    ),
+    'merchant_account_approved': (
+        'Merchant account approved',
+        '{business} is approved and ready to use.',
+        'Compte commerçant approuvé',
+        '{business} est approuvé et prêt à être utilisé.',
+    ),
+    'merchant_account_rejected': (
+        'Merchant account update',
+        'The application for {business} was not approved. Review the application for details.',
+        'Mise à jour du compte commerçant',
+        'La demande pour {business} n’a pas été approuvée. Consultez-la pour plus de détails.',
+    ),
+}
+
+
+def _notification_values(payload, language):
+    def value(*keys, default=''):
+        for key in keys:
+            item = payload.get(key)
+            if item not in (None, ''):
+                return str(item)
+        return default
+
+    resolution = value('resolution')
+    resolution_map = {
+        'reverse': ('reversed', 'annulé'),
+        'deny': ('denied', 'refusé'),
+    }
+    resolution_text = resolution_map.get(resolution, ('updated', 'mis à jour'))
+    return {
+        'amount': value('amount', default='the requested amount' if language == 'en' else 'le montant demandé'),
+        'currency': value('currency'),
+        'sender': value('sender_display_name', 'sender_handle', default='A user' if language == 'en' else 'Un utilisateur'),
+        'requester': value('requester_display_name', 'requester_handle', default='A user' if language == 'en' else 'Un utilisateur'),
+        'creator': value('creator_display_name', 'creator_handle', default='A user' if language == 'en' else 'Un utilisateur'),
+        'payer': value('payer_display_name', 'payer_handle', default='The payer' if language == 'en' else 'Le payeur'),
+        'parent': value('parent_display_name', 'parent_handle', default='A parent' if language == 'en' else 'Un parent'),
+        'child': value('child_display_name', default='The child' if language == 'en' else 'L’enfant'),
+        'recipient': value('recipient_display_name', 'recipient_handle', default='the recipient' if language == 'en' else 'le destinataire'),
+        'fee_amount': value('fee_amount', default='0.00'),
+        'balance_after': value('balance_after', default='0.00'),
+        'device': value('new_device_name', default='a new device' if language == 'en' else 'un nouvel appareil'),
+        'destination': value('destination_phone', default='the recipient' if language == 'en' else 'le destinataire'),
+        'message': value('message_en', 'message', default='You have a new wallet notification.'),
+        'message_fr': value('message_fr', default='Vous avez une nouvelle notification de votre portefeuille.'),
+        'service': value('service', default='utility' if language == 'en' else 'service'),
+        'business': value('business_name', default='Your business' if language == 'en' else 'Votre entreprise'),
+        'resolution': resolution_text[1] if language == 'fr' else resolution_text[0],
+    }
+
 
 def _service_account_info(value):
     info = json.loads(value)
@@ -23,30 +250,9 @@ def create_notification_record(user, notification_type, payload):
     """Create the notification row (synchronous, inside the caller's transaction)."""
     payload = dict(payload or {})
     payload.setdefault('type', notification_type)
-    payload.setdefault('title', {
-        'transfer_approval_requested': 'Transfer approval required',
-        'payment_request_received': 'Payment request received',
-        'split_request_received': 'Split payment requested',
-        'parental_link_requested': 'Parental link approval required',
-        'money_received': 'Money received',
-        'qr_payment_received': 'QR payment received',
-        'payment_request_declined': 'Payment request declined',
-        'parental_link_approved': 'Parental link approved',
-        'parental_link_declined': 'Parental link declined',
-            'transfer_received': 'Money received',
-            'incoming_transfer': 'Incoming transfer',
-        'payment_request_paid': 'Payment request paid',
-        'payment_sent': 'Payment sent',
-        'payment_request_expired': 'Payment request expired',
-        'device_signed_in_elsewhere': 'Security notice',
-        'new_device_login': 'Approve new device sign-in',
-        'device_revoked': 'Device signed out',
-        'mobile_money_withdrawal': 'Transfer sent',
-        'mobile_money_transaction_completed': 'Withdrawal completed',
-        'mobile_money_transaction_failed': 'Withdrawal failed',
-        'merchant_withdrawal_completed': 'Merchant withdrawal completed',
-    }.get(notification_type, 'DSD PAY'))
-    payload.setdefault('message', _notification_message(notification_type, payload))
+    title, message = _localized_notification_content(notification_type, payload, 'en')
+    payload.setdefault('title', title)
+    payload.setdefault('message', message)
     return Notification.objects.create(
         user=user,
         type=notification_type,
@@ -55,113 +261,65 @@ def create_notification_record(user, notification_type, payload):
 
 
 def _notification_message(notification_type, payload):
-    amount = payload.get('amount')
-    currency = payload.get('currency', '')
-    if notification_type == 'transfer_approval_requested':
-        return f"{payload.get('sender_display_name', 'A user')} wants to send {amount} {currency}."
-    if notification_type == 'payment_request_received':
-        return f"{payload.get('requester_display_name', 'A user')} requested {amount} {currency}."
-    if notification_type == 'split_request_received':
-        return f"A split payment request for {amount} {currency} needs your approval."
-    if notification_type == 'parental_link_requested':
-        return f"{payload.get('parent_display_name', 'A parent')} wants to link your account."
-    if notification_type in ('money_received', 'qr_payment_received'):
-        return f"You received {amount} {currency}."
-    if notification_type == 'payment_request_declined':
-        return f"{payload.get('payer_display_name', 'The payer')} declined your request for {amount} {currency}."
-    if notification_type == 'payment_request_expired':
-        return f"Your request for {amount} {currency} expired. Send a new request if you still need payment."
-    if notification_type == 'payment_sent':
-        return (
-            f"You paid {amount} {currency} to {payload.get('recipient_display_name', 'the merchant')} "
-            f"with a fee of {payload.get('fee_amount', '0.00')} {currency}. "
-            f"Your balance is {payload.get('balance_after', '0.00')} {currency}."
-        )
-    if notification_type == 'device_signed_in_elsewhere':
-        return f"A new device signed in to your wallet. Please verify your account if this was not you."
-    if notification_type == 'new_device_login':
-        return f"Approve sign-in from {payload.get('new_device_name', 'a new device')}."
-    if notification_type == 'device_revoked':
-        return 'This device was signed out remotely.'
-    if notification_type == 'mobile_money_withdrawal':
-        return (
-            f"Your transfer of {amount} {currency} to "
-            f"{payload.get('destination_phone', 'the recipient')} was sent."
-        )
-    if notification_type == 'mobile_money_transaction_completed':
-        return f'Your withdrawal of {amount} {currency} was completed.'
-    if notification_type == 'mobile_money_transaction_failed':
-        return f'Your withdrawal of {amount} {currency} failed.'
-    if notification_type == 'merchant_withdrawal_completed':
-        return f'Your bank withdrawal of {amount} {currency} was completed.'
-    if notification_type == 'parental_link_approved':
-        return f"{payload.get('child_display_name', 'Your child')} approved the parental link."
-    if notification_type == 'parental_link_declined':
-        return f"{payload.get('child_display_name', 'The child')} declined the parental link."
-    if notification_type == 'transfer_received':
-        return f"You received {amount} {currency}."
-    if notification_type == 'incoming_transfer':
-        return f"{payload.get('sender_display_name', 'A user')} started a transfer of {amount} {currency}."
-    return 'You have a new wallet update.'
+    copy = _NOTIFICATION_COPY.get(notification_type)
+    if copy:
+        return copy[1].format_map(_notification_values(payload, 'en'))
+    return payload.get('message_en', payload.get('message', 'You have a new wallet notification.'))
 
 
 def _localized_notification_content(notification_type, payload, language_code):
-    """Return the notification-bar copy for the device's preferred language."""
-    if language_code != 'fr':
+    """Return notification copy in English or French."""
+    language = (language_code or 'en').split('-', 1)[0].lower()
+    copy = _NOTIFICATION_COPY.get(notification_type)
+    if copy:
+        title_en, message_en, title_fr, message_fr = copy
+        values = _notification_values(payload, language)
         return (
-            payload.get('title', 'DSD PAY'),
-            payload.get('message', _notification_message(notification_type, payload)),
+            title_fr if language == 'fr' else title_en,
+            (message_fr if language == 'fr' else message_en).format_map(values),
         )
 
-    amount = payload.get('amount')
-    currency = payload.get('currency', '')
-    sender = payload.get('sender_display_name', 'Un utilisateur')
-    if notification_type == 'transfer_approval_requested':
-        return ('Approbation de transfert requise', f'{sender} veut envoyer {amount} {currency}.')
-    if notification_type == 'payment_request_received':
-        return ('Demande de paiement reçue', f'{payload.get("requester_display_name", "Un utilisateur")} demande {amount} {currency}.')
-    if notification_type == 'split_request_received':
-        return ('Paiement partagé demandé', f'Une demande de paiement de {amount} {currency} attend votre approbation.')
-    if notification_type == 'parental_link_requested':
-        return ('Approbation parentale requise', f'{payload.get("parent_display_name", "Un parent")} veut associer votre compte.')
-    if notification_type in ('money_received', 'qr_payment_received', 'transfer_received'):
-        return ('Argent reçu', f'Vous avez reçu {amount} {currency}.')
-    if notification_type == 'incoming_transfer':
-        return ('Transfert entrant', f'{sender} a commencé un transfert de {amount} {currency}.')
-    if notification_type == 'payment_request_declined':
-        return ('Demande refusée', f'{payload.get("payer_display_name", "Le payeur")} a refusé votre demande de {amount} {currency}.')
-    if notification_type == 'payment_request_expired':
-        return ('Demande expirée', f'Votre demande de {amount} {currency} a expiré.')
-    if notification_type == 'payment_request_paid':
-        return ('Demande payée', f'Votre demande de {amount} {currency} a été payée.')
-    if notification_type == 'payment_sent':
+    if language == 'fr':
         return (
-            'Paiement envoyé',
-            f'Vous avez payé {amount} {currency} à {payload.get("recipient_display_name", "le commerçant")}, '
-            f'avec des frais de {payload.get("fee_amount", "0.00")} {currency}. '
-            f'Solde : {payload.get("balance_after", "0.00")} {currency}.',
+            payload.get('title_fr') or 'DSD PAY',
+            payload.get('message_fr') or 'Vous avez une nouvelle notification de votre portefeuille.',
         )
-    if notification_type == 'new_device_login':
-        return ('Nouveau appareil', f'Approuvez la connexion depuis {payload.get("new_device_name", "un nouvel appareil")}.')
-    if notification_type == 'device_signed_in_elsewhere':
-        return ('Alerte de sécurité', 'Un nouvel appareil s’est connecté à votre portefeuille.')
-    if notification_type == 'device_revoked':
-        return ('Appareil déconnecté', 'Cet appareil a été déconnecté à distance.')
-    if notification_type == 'mobile_money_withdrawal':
-        return ('Transfert envoyé', f'Votre transfert de {amount} {currency} vers {payload.get("destination_phone", "le destinataire")} a été envoyé.')
-    if notification_type == 'mobile_money_transaction_completed':
-        return ('Retrait terminé', f'Votre retrait de {amount} {currency} est terminé.')
-    if notification_type == 'mobile_money_transaction_failed':
-        return ('Échec du retrait', f'Votre retrait de {amount} {currency} a échoué.')
-    if notification_type == 'merchant_withdrawal_completed':
-        return ('Retrait bancaire terminé', f'Votre retrait bancaire de {amount} {currency} est terminé.')
-    if notification_type == 'parental_link_approved':
-        return ('Lien parental approuvé', f'{payload.get("child_display_name", "Votre enfant")} a approuvé le lien parental.')
-    if notification_type == 'parental_link_declined':
-        return ('Lien parental refusé', f'{payload.get("child_display_name", "L’enfant")} a refusé le lien parental.')
-    if notification_type == 'parental_link_approved':
-        return ('Lien parental approuvé', f'{payload.get("child_display_name", "Votre enfant")} a approuvé le lien parental.')
-    return ('DSD PAY', 'Vous avez une nouvelle mise à jour de votre portefeuille.')
+    return (
+        payload.get('title_en') or payload.get('title') or 'DSD PAY',
+        payload.get('message_en') or payload.get('message') or 'You have a new wallet notification.',
+    )
+
+
+def localized_notification_payload(notification, language_code):
+    payload = dict(notification.payload or {})
+    title, message = _localized_notification_content(
+        notification.type,
+        payload,
+        'fr' if (language_code or '').split('-', 1)[0].lower() == 'fr' else 'en',
+    )
+    payload.update({'title': title, 'message': message})
+    return payload
+
+
+def should_send_notification_push(notification_type):
+    return notification_type.startswith((
+        'transfer_', 'payment_request_', 'split_request_', 'parental_',
+        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'transaction_',
+    )) or notification_type in {
+        'incoming_transfer',
+        'incoming_qr_payment',
+        'payment_sent',
+        'merchant_payment_received',
+        'merchant_withdrawal_completed',
+        'merchant_account_approved',
+        'merchant_account_rejected',
+        'scheduled_transfer_failed',
+        'utility_payment_completed',
+        'dispute_resolved',
+        'device_signed_in_elsewhere',
+        'device_revoked',
+        'new_device_login',
+    }
 
 
 def deliver_notification(notification_id):
@@ -175,10 +333,7 @@ def deliver_notification(notification_id):
         logger.warning('deliver_notification_missing', extra={'notification_id': notification_id})
         return {'status': 'not_found'}
 
-    if notification.type.startswith((
-        'transfer_', 'payment_request_', 'split_request_', 'parental_',
-        'wallet_', 'money_', 'qr_payment_', 'mobile_money_', 'incoming_transfer', 'device_signed_in_elsewhere', 'new_device_login'
-    )):
+    if should_send_notification_push(notification.type):
         _send_push(notification)
 
     logger.info(
@@ -267,70 +422,77 @@ def _send_push(notification):
     target_device_id = payload.get('target_device_id')
     if target_device_id:
         devices = devices.filter(device_id=target_device_id)
-    if not devices.exists():
+    unique_devices = {}
+    for device in devices.order_by('-last_seen_at'):
+        identity = device.device_id or device.token
+        unique_devices.setdefault(identity, device)
+    devices = list(unique_devices.values())
+    if not devices:
         logger.warning(
             'notification_no_active_devices',
             extra={'notification_id': notification.id, 'user_id': notification.user_id},
         )
         return
+    language = (notification.user.language_code or 'en').split('-', 1)[0].lower()
+    language = 'fr' if language == 'fr' else 'en'
+    title, body = _localized_notification_content(notification.type, payload, language)
     data = {key: str(value) for key, value in payload.items() if value is not None}
-    devices_by_language = {}
-    for device in devices:
-        language = (device.language_code or 'fr').split('-', 1)[0].lower()
-        devices_by_language.setdefault(language, []).append(device)
-
-    for language, language_devices in devices_by_language.items():
-        title, body = _localized_notification_content(notification.type, payload, language)
-        message = messaging.MulticastMessage(
-            tokens=[device.token for device in language_devices],
-            notification=messaging.Notification(title=title, body=body),
-            data=data,
-            apns=messaging.APNSConfig(
-                headers={'apns-push-type': 'alert', 'apns-priority': '10'},
-                payload=messaging.APNSPayload(
-                    aps=messaging.Aps(sound='default', badge=1),
-                ),
+    data.update({
+        'type': notification.type,
+        'title': title,
+        'message': body,
+    })
+    data['notification_id'] = str(notification.id)
+    message = messaging.MulticastMessage(
+        tokens=[device.token for device in devices],
+        notification=messaging.Notification(title=title, body=body),
+        data=data,
+        apns=messaging.APNSConfig(
+            headers={'apns-push-type': 'alert', 'apns-priority': '10'},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound='default', badge=1),
             ),
-        )
-        try:
-            response = messaging.send_each_for_multicast(message)
-        except Exception:
-            logger.exception(
-                'firebase_multicast_send_failed',
-                extra={
-                    'notification_id': notification.id,
-                    'user_id': notification.user_id,
-                    'platforms': [device.platform for device in language_devices],
-                },
-            )
-            continue
-        logger.info(
-            'firebase_multicast_send_complete',
+        ),
+    )
+    try:
+        response = messaging.send_each_for_multicast(message)
+    except Exception:
+        logger.exception(
+            'firebase_multicast_send_failed',
             extra={
                 'notification_id': notification.id,
                 'user_id': notification.user_id,
-                'language': language,
-                'success_count': response.success_count,
-                'failure_count': response.failure_count,
+                'platforms': [device.platform for device in devices],
             },
         )
-        for device, result in zip(language_devices, response.responses):
-            if not result.success and (
-                'registration-token-not-registered' in str(result.exception)
-                or 'not a valid FCM registration token' in str(result.exception)
-            ):
-                device.active = False
-                device.save(update_fields=['active'])
-            elif not result.success:
-                logger.warning(
-                    'firebase_device_send_failed',
-                    extra={
-                        'notification_id': notification.id,
-                        'device_id': device.id,
-                        'platform': device.platform,
-                        'error': str(result.exception),
-                    },
-                )
+        return
+    logger.info(
+        'firebase_multicast_send_complete',
+        extra={
+            'notification_id': notification.id,
+            'user_id': notification.user_id,
+            'language': language,
+            'success_count': response.success_count,
+            'failure_count': response.failure_count,
+        },
+    )
+    for device, result in zip(devices, response.responses):
+        if not result.success and (
+            'registration-token-not-registered' in str(result.exception)
+            or 'not a valid FCM registration token' in str(result.exception)
+        ):
+            device.active = False
+            device.save(update_fields=['active'])
+        elif not result.success:
+            logger.warning(
+                'firebase_device_send_failed',
+                extra={
+                    'notification_id': notification.id,
+                    'device_id': device.id,
+                    'platform': device.platform,
+                    'error': str(result.exception),
+                },
+            )
 
 
 def broadcast_notification(notification_type, payload, user_ids=None):

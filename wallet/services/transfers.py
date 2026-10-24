@@ -168,6 +168,7 @@ def execute_p2p_transfer(
         {
             'transaction_id': str(transaction_obj.id),
             'sender_handle': sender.handle,
+            'sender_display_name': sender.display_name,
             'amount': str(amount),
             'currency': currency,
             'note': note,
@@ -179,8 +180,11 @@ def execute_p2p_transfer(
         {
             'transaction_id': str(transaction_obj.id),
             'recipient_handle': recipient.handle,
+            'recipient_display_name': recipient.display_name,
             'amount': str(amount),
             'currency': currency,
+            'fee_amount': str(fee_amount),
+            'balance_after': str(sender_wallet.get_balance()),
             'note': note,
         },
     )

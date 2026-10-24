@@ -1,5 +1,6 @@
 import base64
 import binascii
+import logging
 import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -7,6 +8,8 @@ from cryptography.exceptions import InvalidTag
 from django.conf import settings
 from django.core.cache import cache
 from django.http import JsonResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ApiEnvelopeMiddleware:
@@ -40,8 +43,8 @@ class ApiEnvelopeMiddleware:
                 raise ValueError('expired')
             if not request_id or len(request_id) > 128:
                 raise ValueError('request id')
-            nonce_bytes = base64.urlsafe_b64decode(nonce.encode())
-            ciphertext = base64.urlsafe_b64decode(request.body)
+            nonce_bytes = _decode_base64(nonce)
+            ciphertext = _decode_base64(request.body)
             if len(nonce_bytes) != 12:
                 raise ValueError('nonce')
             key = getattr(settings, 'API_ENVELOPE_KEY', '')
@@ -50,7 +53,22 @@ class ApiEnvelopeMiddleware:
             key_bytes = _decode_key(key)
             aad = f'{request.method}\n{request.path}\n{timestamp}\n{request_id}'.encode()
             plaintext = AESGCM(key_bytes).decrypt(nonce_bytes, ciphertext, aad)
-        except (ValueError, binascii.Error, TypeError, InvalidTag):
+        except InvalidTag:
+            logger.warning(
+                'Request envelope authentication failed: method=%s path=%s request_id=%s',
+                request.method,
+                request.path,
+                request_id or '<missing>',
+            )
+            return JsonResponse({'error': 'Invalid or expired request envelope'}, status=400)
+        except (ValueError, binascii.Error, TypeError) as exc:
+            logger.warning(
+                'Request envelope rejected: method=%s path=%s request_id=%s reason=%s',
+                request.method,
+                request.path,
+                request_id or '<missing>',
+                str(exc),
+            )
             return JsonResponse({'error': 'Invalid or expired request envelope'}, status=400)
 
         cache_key = f'api-envelope:{request_id}'
@@ -63,7 +81,7 @@ class ApiEnvelopeMiddleware:
 
 def _decode_key(value):
     try:
-        decoded = base64.urlsafe_b64decode(value.encode())
+        decoded = _decode_base64(value)
         if len(decoded) == 32:
             return decoded
     except (binascii.Error, ValueError):
@@ -75,3 +93,8 @@ def _decode_key(value):
     if len(decoded) != 32:
         raise ValueError('API_ENVELOPE_KEY must decode to 32 bytes')
     return decoded
+
+
+def _decode_base64(value):
+    raw = value.encode() if isinstance(value, str) else value
+    return base64.urlsafe_b64decode(raw + b'=' * (-len(raw) % 4))

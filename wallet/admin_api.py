@@ -60,10 +60,19 @@ class AdminTransactionCrudSerializer(ModelSerializer):
 
 
 class AdminPeriodicTaskCrudSerializer(ModelSerializer):
+    schedule_description = serializers.SerializerMethodField()
+
     class Meta:
         model = PeriodicTask
-        fields = ['id', 'name', 'task', 'enabled', 'description', 'last_run_at', 'total_run_count']
+        fields = ['id', 'name', 'task', 'enabled', 'description', 'last_run_at', 'total_run_count', 'schedule_description']
         read_only_fields = ['id', 'last_run_at', 'total_run_count']
+
+    def get_schedule_description(self, obj):
+        if obj.interval:
+            return f'Every {obj.interval.every} {obj.interval.period}'
+        if obj.crontab:
+            return f'{obj.crontab.minute} {obj.crontab.hour} {obj.crontab.day_of_month} {obj.crontab.month_of_year}'
+        return 'Schedule unavailable'
 
 
 def _audit(request, action, metadata):

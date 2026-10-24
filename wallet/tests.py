@@ -15,6 +15,7 @@ from .models import (
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus,
     TransferAttempt
 )
+from .models import ScheduledTransfer, ScheduleFrequency, UtilityPayment, UtilityService
 from .serializers import generate_unique_handle
 
 
@@ -81,6 +82,27 @@ class WalletModelTest(TestCase):
         self.assertEqual(self.wallet.get_balance(), Decimal('50.00'))
 
 
+class UtilityAndScheduleModelTest(TestCase):
+    def setUp(self):
+        self.sender = User.objects.create_user(email='sender@example.com',
+                                               handle='sender', display_name='Sender')
+        self.recipient = User.objects.create_user(email='recipient@example.com',
+                                                  handle='recipient', display_name='Recipient')
+        Wallet.objects.create(user=self.sender, currency='GNF')
+        Wallet.objects.create(user=self.recipient, currency='GNF')
+
+    def test_named_schedule_preserves_name(self):
+        schedule = ScheduledTransfer.objects.create(
+            sender=self.sender, recipient=self.recipient, name='Monthly rent',
+            amount=Decimal('100.00'), currency='GNF',
+            frequency=ScheduleFrequency.MONTHLY, next_execution=timezone.now())
+        self.assertEqual(schedule.name, 'Monthly rent')
+
+    def test_utility_service_choices_are_distinct(self):
+        self.assertEqual(UtilityService.WATER, 'water')
+        self.assertEqual(UtilityService.ELECTRICITY, 'electricity')
+
+
 class CSRFEndpointTest(APITestCase):
     def test_csrf_cookie_endpoint_sets_cookie(self):
         response = self.client.get('/api/csrf')
@@ -108,6 +130,62 @@ class EmailAuthFlowTest(APITestCase):
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
         self.assertIn('access_token', login_response.data)
         self.assertEqual(login_response.data['user']['email'], 'newuser@example.com')
+
+    def test_merchant_team_member_web_login_does_not_require_device_id(self):
+        from .models import Merchant, MerchantTeamMember, TrustedDevice
+
+        owner = User.objects.create_user(
+            email='merchant.owner@example.com',
+            google_sub='merchant_owner_google',
+            handle='merchantowner',
+            display_name='Merchant Owner',
+            status=UserStatus.ACTIVE,
+        )
+        owner_wallet = Wallet.objects.create(user=owner, currency='GNF')
+        merchant = Merchant.objects.create(
+            user=owner,
+            business_name='Test Merchant',
+            wallet=owner_wallet,
+        )
+        member = User.objects.create_user(
+            email='merchant.member@example.com',
+            google_sub='merchant_member_google',
+            handle='merchantmember',
+            display_name='Merchant Member',
+            status=UserStatus.ACTIVE,
+            current_device_id='member-phone',
+        )
+        member.set_password('StrongPass123')
+        member.save(update_fields=['password'])
+        TrustedDevice.objects.create(user=member, device_id='member-phone')
+        MerchantTeamMember.objects.create(
+            merchant=merchant,
+            user=member,
+            email=member.email,
+            invited_by=owner,
+            accepted_at=timezone.now(),
+        )
+
+        payload = {
+            'email': member.email,
+            'password': 'StrongPass123',
+        }
+        wallet_login = self.client.post('/api/auth/login', payload, format='json')
+        self.assertEqual(wallet_login.status_code, status.HTTP_400_BAD_REQUEST)
+
+        merchant_login = self.client.post(
+            '/api/auth/login',
+            {**payload, 'merchant_login': True},
+            format='json',
+        )
+
+        self.assertEqual(merchant_login.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            merchant_login.data['merchant_workspace']['merchant_id'],
+            str(merchant.id),
+        )
+        member.refresh_from_db()
+        self.assertEqual(member.current_device_id, 'member-phone')
 
 
 class AdminAuthTest(APITestCase):

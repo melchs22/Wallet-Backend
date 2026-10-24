@@ -15,5 +15,7 @@ django-celery-beat==2.9.0
 whitenoise==6.9.0
 flower==2.0.1
 requests==2.32.3
+psutil==7.0.0
 firebase-admin==7.1.0
 cryptography==44.0.2
+pyotp==2.9.0

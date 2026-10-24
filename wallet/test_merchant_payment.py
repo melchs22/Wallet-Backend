@@ -9,7 +9,7 @@ from datetime import timedelta
 
 from wallet.models import (
     FeeAppliesTo, FeePolicy, LedgerDirection, LedgerEntry, Merchant,
-    MerchantApiKey, MerchantMode, MerchantStatus, PaymentIntent,
+    MerchantApiKey, MerchantMode, MerchantStatus, Notification, PaymentIntent,
     PaymentIntentStatus, Wallet, WalletStatus,
 )
 from wallet.services.fees import resolve_fee
@@ -84,7 +84,7 @@ class MerchantPaymentTestCase(TestCase):
             self.merchant, amount=Decimal('20.00'), currency='USD',
             mode=MerchantMode.LIVE,
         )
-        with patch('wallet.tasks.deliver_webhook_task.delay'):
+        with patch('wallet.tasks.deliver_webhook_task.delay'), patch('wallet.tasks.send_notification_task.delay') as send_notification:
             confirm_payment_intent(intent, self.customer, 'idem-checkout-1')
         intent.refresh_from_db()
         self.assertEqual(intent.status, PaymentIntentStatus.SUCCEEDED)
@@ -94,6 +94,9 @@ class MerchantPaymentTestCase(TestCase):
         fee_amount, _ = resolve_fee(Decimal('20.00'), FeeAppliesTo.MERCHANT_TRANSFER, currency='USD')
         self.assertEqual(self.customer_wallet.get_balance(), Decimal('100.00') - Decimal('20.00') - fee_amount)
         self.assertEqual(self.merchant_wallet.get_balance(), Decimal('20.00'))
+        self.assertEqual(Notification.objects.filter(user=self.customer, type='payment_sent').count(), 1)
+        self.assertEqual(Notification.objects.filter(user=self.merchant_user, type='merchant_payment_received').count(), 1)
+        self.assertEqual(send_notification.call_count, 2)
 
     def test_sandbox_payment_does_not_affect_live_balance(self):
         intent = create_payment_intent(

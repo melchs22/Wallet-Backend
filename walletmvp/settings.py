@@ -37,7 +37,11 @@ API_ENVELOPE_KEY = os.getenv('API_ENVELOPE_KEY', '')
 API_ENVELOPE_TIMESTAMP_TOLERANCE = int(
     os.getenv('API_ENVELOPE_TIMESTAMP_TOLERANCE', '300')
 )
+RECAPTCHA_SECRET_KEY = os.getenv('RECAPTCHA_SECRET_KEY', '')
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'DSD PAY <noreply@dsdwallet.com>')
 DEBUG = getenv_bool('DEBUG', False)
+NEARBY_PAYMENTS_ENABLED = getenv_bool('NEARBY_PAYMENTS_ENABLED', False)
 ALLOWED_HOSTS = [
     '178.128.156.225',
     'localhost',
@@ -220,6 +224,9 @@ REST_FRAMEWORK = {
         'merchant_api': '1000/hour',
         'otp_request': '5/hour',
         'otp_verify': '10/15minute',
+        'nearby_payment_create': '10/hour',
+        'nearby_payment_resolve': '20/minute',
+        'nearby_payment_pay': '10/minute',
     },
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'wallet.exceptions.custom_exception_handler',

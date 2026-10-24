@@ -18,3 +18,15 @@ class OtpRequestThrottle(UserRateThrottle):
 
 class OtpVerifyThrottle(UserRateThrottle):
     scope = 'otp_verify'
+
+
+class NearbyPaymentCreateThrottle(UserRateThrottle):
+    scope = 'nearby_payment_create'
+
+
+class NearbyPaymentResolveThrottle(UserRateThrottle):
+    scope = 'nearby_payment_resolve'
+
+
+class NearbyPaymentPayThrottle(UserRateThrottle):
+    scope = 'nearby_payment_pay'

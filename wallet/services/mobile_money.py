@@ -100,7 +100,7 @@ def process_mobile_money_webhook_event(provider_transaction_id, status, provider
             if status == 'completed'
             else 'mobile_money_transaction_failed'
         )
-        create_notification_record(
+        notification = create_notification_record(
             mm_transaction.user,
             notification_type,
             {
@@ -117,9 +117,7 @@ def process_mobile_money_webhook_event(provider_transaction_id, status, provider
 
     try:
         from wallet.tasks import send_notification_task
-        notification = mm_transaction.user.notifications.order_by('-created_at').first()
-        if notification:
-            send_notification_task.delay(notification.id)
+        send_notification_task.delay(notification.id)
     except Exception:
         logger.exception('mobile_money_notification_dispatch_failed')
 

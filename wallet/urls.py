@@ -17,12 +17,15 @@ from .views import (
     pay_qr_payload, list_linked_providers, link_mobile_money_provider,
     mobile_money_topup, mobile_money_withdrawal, mobile_money_webhook, list_mobile_money_transactions,
     create_scheduled_transfer, list_scheduled_transfers, get_scheduled_transfer_detail,
-    pause_scheduled_transfer, resume_scheduled_transfer, cancel_scheduled_transfer,
+    update_scheduled_transfer, pause_scheduled_transfer, resume_scheduled_transfer, cancel_scheduled_transfer,
+    create_utility_payment, list_utility_payments,
     create_merchant_account, get_merchant_account, generate_merchant_qr,
     merchant_dashboard, merchant_payout_schedule, merchant_logs, merchant_payment_links, deactivate_merchant_payment_link, merchant_kyc_documents, merchant_credentials, merchant_webhook_config,
     merchant_plans, merchant_subscription, admin_list_merchants, admin_approve_merchant,
     supported_countries, app_update_status, legal_document, legal_document_html, provider_catalog,
-    change_password, UserKYCSubmissionView, login_status, confirm_login, trusted_devices, revoke_trusted_device
+    change_password, UserKYCSubmissionView, login_status, confirm_login, trusted_devices, revoke_trusted_device,
+    password_reset_request, password_reset_confirm, team_invitation_confirm,
+    admin_totp_setup, admin_totp_confirm, admin_totp_verify,
 )
 from .approval_views import list_pending_approvals, approve_transaction, decline_transaction
 from .parental_views import (
@@ -32,6 +35,7 @@ from .parental_views import (
 from . import admin_views
 from . import admin_api
 from . import merchant_views
+from . import nearby_views
 
 
 urlpatterns = [
@@ -42,6 +46,9 @@ urlpatterns = [
     path('auth/login', EmailLoginView.as_view(), name='email_login'),
     path('auth/login/otp', MerchantLoginOtpVerifyView.as_view(), name='merchant_login_otp'),
     path('auth/change-password', change_password, name='change_password'),
+    path('auth/password-reset/request', password_reset_request, name='password_reset_request'),
+    path('auth/password-reset/confirm', password_reset_confirm, name='password_reset_confirm'),
+    path('auth/team-invitation/confirm', team_invitation_confirm, name='team_invitation_confirm'),
     path('countries', supported_countries, name='supported_countries'),
     path('app/update-status', app_update_status, name='app_update_status'),
     path('legal/<slug:slug>', legal_document, name='legal_document'),
@@ -50,6 +57,9 @@ urlpatterns = [
     path('kyc/submissions', UserKYCSubmissionView.as_view(), name='user_kyc_submissions'),
     path('auth/admin', AdminLoginView.as_view(), name='admin_login'),
     path('admin/auth/login', admin_auth_login, name='admin_auth_login'),
+    path('admin/auth/totp/setup', admin_totp_setup, name='admin_totp_setup'),
+    path('admin/auth/totp/confirm', admin_totp_confirm, name='admin_totp_confirm'),
+    path('admin/auth/totp/verify', admin_totp_verify, name='admin_totp_verify'),
     path('admin/auth/logout', admin_auth_logout, name='admin_auth_logout'),
     path('admin/auth/change-password', admin_change_password, name='admin_change_password'),
     path('csrf', csrf_cookie_view, name='csrf_cookie'),
@@ -102,6 +112,13 @@ urlpatterns = [
     path('me/qr-payload', get_qr_payload, name='get_qr_payload'),
     path('qr/verify', verify_qr_payload, name='verify_qr_payload'),
     path('qr/pay', pay_qr_payload, name='pay_qr_payload'),
+
+    # BLE-assisted nearby payments
+    path('nearby-payments', nearby_views.create_nearby_payment, name='nearby_payment_create'),
+    path('nearby-payments/resolve', nearby_views.resolve_nearby_payment, name='nearby_payment_resolve'),
+    path('nearby-payments/<uuid:request_id>', nearby_views.nearby_payment_status, name='nearby_payment_status'),
+    path('nearby-payments/<uuid:request_id>/pay', nearby_views.pay_nearby_payment, name='nearby_payment_pay'),
+    path('nearby-payments/<uuid:request_id>/cancel', nearby_views.cancel_nearby_payment, name='nearby_payment_cancel'),
     
     # Bill Splits
     path('splits', create_split, name='create_split'),
@@ -150,9 +167,13 @@ urlpatterns = [
     path('admin/mobile-money/transactions/<int:transaction_id>/retry', admin_views.admin_mobile_money_retry, name='admin_mobile_money_retry'),
     path('admin/merchants/webhooks/failed', admin_views.admin_failed_webhooks_list, name='admin_failed_webhooks_list'),
     path('admin/merchants/webhooks/<int:delivery_id>/retry', admin_views.admin_webhook_retry, name='admin_webhook_retry'),
+    path('admin/merchants/<int:merchant_id>', admin_views.admin_merchant_detail, name='admin_merchant_detail'),
 
     # Financial & FX Control
     path('admin/finance/fee-rules', admin_views.admin_fee_rules_list_create, name='admin_fee_rules_list_create'),
+    path('admin/finance/fee-rules/<int:rule_id>', admin_views.admin_fee_rule_detail, name='admin_fee_rule_detail'),
+    path('admin/finance/fee-policies', admin_views.admin_fee_policies, name='admin_fee_policies'),
+    path('admin/finance/fee-policies/<int:policy_id>', admin_views.admin_fee_policy_detail, name='admin_fee_policy_detail'),
     path('admin/finance/fee-waivers', admin_views.admin_fee_waiver_create, name='admin_fee_waiver_create'),
     path('admin/finance/exchange-rates', admin_views.admin_exchange_rates_list, name='admin_exchange_rates_list'),
     path('admin/finance/exchange-rates/refresh', admin_views.admin_exchange_rates_refresh, name='admin_exchange_rates_refresh'),
@@ -168,6 +189,7 @@ urlpatterns = [
 
     # New Production-Ready Admin Endpoints
     path('admin/analytics', admin_views.admin_analytics, name='admin_analytics'),
+    path('admin/fee-revenue', admin_views.admin_fee_revenue, name='admin_fee_revenue'),
     path('admin/users/<int:user_id>/notes', admin_views.admin_user_notes, name='admin_user_notes'),
     path('admin/users/bulk-action', admin_views.admin_bulk_user_action, name='admin_bulk_user_action'),
     path('admin/transactions/<str:transaction_id>/flags', admin_views.admin_transaction_flags, name='admin_transaction_flags'),
@@ -209,9 +231,13 @@ urlpatterns = [
     path('scheduled-transfers/create', create_scheduled_transfer, name='create_scheduled_transfer'),
     path('scheduled-transfers', list_scheduled_transfers, name='list_scheduled_transfers'),
     path('scheduled-transfers/<int:transfer_id>', get_scheduled_transfer_detail, name='get_scheduled_transfer_detail'),
+    path('scheduled-transfers/<int:transfer_id>/edit', update_scheduled_transfer, name='update_scheduled_transfer'),
     path('scheduled-transfers/<int:transfer_id>/pause', pause_scheduled_transfer, name='pause_scheduled_transfer'),
     path('scheduled-transfers/<int:transfer_id>/resume', resume_scheduled_transfer, name='resume_scheduled_transfer'),
     path('scheduled-transfers/<int:transfer_id>/cancel', cancel_scheduled_transfer, name='cancel_scheduled_transfer'),
+    # Utility payments
+    path('utilities/pay', create_utility_payment, name='create_utility_payment'),
+    path('utilities/payments', list_utility_payments, name='list_utility_payments'),
     
     # Merchant Accounts
     path('merchant-plans', merchant_plans, name='merchant_plans'),

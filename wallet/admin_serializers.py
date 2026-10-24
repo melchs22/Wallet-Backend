@@ -4,7 +4,7 @@ from django_celery_beat.models import PeriodicTask
 from wallet.models import (
     SupportTicket, SupportTicketMessage, SupportTicketStatus, SupportTicketPriority, SupportTicketCategory,
     UserKYCSubmission, MobileMoneyTransaction, WebhookDelivery, Settlement,
-    TransferFeeRule, FeeWaiver, ExchangeRate, Merchant, Transaction,
+    TransferFeeRule, FeePolicy, FeeWaiver, ExchangeRate, Merchant, Transaction,
     UserNote, TransactionFlag, AlertRule, AlertEvent, AdminMessage
 )
 from wallet.serializers import UserSerializer, TransactionDetailSerializer
@@ -160,9 +160,55 @@ class SettlementAdminSerializer(serializers.ModelSerializer):
 
 
 class TransferFeeRuleAdminSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        min_amount = attrs.get('min_amount', getattr(self.instance, 'min_amount', None))
+        max_amount = attrs.get('max_amount', getattr(self.instance, 'max_amount', None))
+        fee_value = attrs.get('fee_value', getattr(self.instance, 'fee_value', None))
+        if min_amount is not None and min_amount < 0:
+            raise serializers.ValidationError({'min_amount': 'Minimum amount cannot be negative.'})
+        if max_amount is not None and min_amount is not None and max_amount <= min_amount:
+            raise serializers.ValidationError({'max_amount': 'Maximum amount must be greater than the minimum amount.'})
+        if fee_value is not None and fee_value < 0:
+            raise serializers.ValidationError({'fee_value': 'Fee value cannot be negative.'})
+        if attrs.get('fee_type', getattr(self.instance, 'fee_type', None)) == 'percentage' and fee_value is not None and fee_value > 100:
+            raise serializers.ValidationError({'fee_value': 'Percentage fee cannot exceed 100.'})
+        return attrs
+
     class Meta:
         model = TransferFeeRule
         fields = ['id', 'min_amount', 'max_amount', 'fee_type', 'fee_value', 'active']
+
+
+class FeePolicyAdminSerializer(serializers.ModelSerializer):
+    merchant_name = serializers.CharField(source='merchant.business_name', read_only=True, allow_null=True)
+
+    def validate(self, attrs):
+        applies_to = attrs.get('applies_to', getattr(self.instance, 'applies_to', None))
+        fee_percent = attrs.get('fee_percent', getattr(self.instance, 'fee_percent', None))
+        fee_fixed = attrs.get('fee_fixed', getattr(self.instance, 'fee_fixed', None))
+        if applies_to not in ('p2p_transfer', 'merchant_transfer'):
+            raise serializers.ValidationError({'applies_to': 'Choose P2P or merchant transfers.'})
+        if fee_percent is None and fee_fixed is None:
+            raise serializers.ValidationError('Set a percentage fee, a fixed fee, or both.')
+        if fee_percent is not None and (fee_percent < 0 or fee_percent > 100):
+            raise serializers.ValidationError({'fee_percent': 'Percentage fee must be between 0 and 100.'})
+        if fee_fixed is not None and fee_fixed < 0:
+            raise serializers.ValidationError({'fee_fixed': 'Fixed fee cannot be negative.'})
+        currency = attrs.get('currency', getattr(self.instance, 'currency', ''))
+        if currency and len(currency) != 3:
+            raise serializers.ValidationError({'currency': 'Currency must be a three-letter code or blank for all currencies.'})
+        merchant = attrs.get('merchant', getattr(self.instance, 'merchant', None))
+        if applies_to == 'p2p_transfer' and merchant is not None:
+            raise serializers.ValidationError({'merchant': 'P2P policies apply to all users and cannot target a merchant.'})
+        return attrs
+
+    class Meta:
+        model = FeePolicy
+        fields = [
+            'id', 'name', 'applies_to', 'merchant', 'merchant_name', 'currency',
+            'fee_percent', 'fee_fixed', 'priority', 'is_active', 'created_at',
+        ]
+        read_only_fields = ['id', 'merchant_name', 'created_at']
 
 
 class FeeWaiverAdminSerializer(serializers.ModelSerializer):
@@ -174,9 +220,12 @@ class FeeWaiverAdminSerializer(serializers.ModelSerializer):
 
 
 class ExchangeRateAdminSerializer(serializers.ModelSerializer):
+    base_currency = serializers.CharField(source='from_currency', read_only=True)
+    quote_currency = serializers.CharField(source='to_currency', read_only=True)
+
     class Meta:
         model = ExchangeRate
-        fields = ['id', 'from_currency', 'to_currency', 'rate', 'source', 'valid_from', 'valid_until', 'created_at']
+        fields = ['id', 'from_currency', 'to_currency', 'base_currency', 'quote_currency', 'rate', 'source', 'valid_from', 'valid_until', 'created_at']
 
 
 # ============================================================================

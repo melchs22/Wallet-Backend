@@ -169,6 +169,7 @@ class TransactionType(models.TextChoices):
     REVERSAL = 'reversal', 'Reversal'
     TOPUP = 'topup', 'Top-up'
     WITHDRAWAL = 'withdrawal', 'Withdrawal'
+    UTILITY_PAYMENT = 'utility_payment', 'Utility payment'
 
 
 class TransactionStatus(models.TextChoices):
@@ -200,6 +201,7 @@ class User(AbstractUser):
     primary_phone_number = models.CharField(max_length=30, unique=True, null=True, blank=True, db_index=True, help_text="Primary phone number for transfers and payments")
     handle = models.CharField(max_length=50, unique=True, db_index=True)
     display_name = models.CharField(max_length=255)
+    language_code = models.CharField(max_length=10, blank=True, default='en')
     avatar_url = models.URLField(blank=True)
     kyc_tier = models.CharField(
         max_length=20,
@@ -267,6 +269,17 @@ class ParentalControl(models.Model):
         unique_together = ['parent', 'child']
         verbose_name = 'Parental Control'
         verbose_name_plural = 'Parental Controls'
+
+
+class AdminTOTP(models.Model):
+    """Encrypted TOTP secret and first-login setup state for a staff user."""
+    user = models.OneToOneField('User', on_delete=models.CASCADE, related_name='admin_totp')
+    secret_encrypted = models.TextField(blank=True, default='')
+    setup_token_hash = models.CharField(max_length=256, blank=True, default='')
+    is_enabled = models.BooleanField(default=False)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
 
 class Wallet(models.Model):
@@ -382,6 +395,48 @@ class PaymentRequest(models.Model):
         indexes = [
             models.Index(fields=['requester', 'status', 'created_at']),
             models.Index(fields=['payer', 'status', 'created_at']),
+        ]
+
+
+class NearbyPaymentRequest(models.Model):
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        PAID = 'paid', 'Paid'
+        CANCELLED = 'cancelled', 'Cancelled'
+        EXPIRED = 'expired', 'Expired'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    receiver = models.ForeignKey(User, on_delete=models.CASCADE, related_name='nearby_payment_requests')
+    payer = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='nearby_payments_made'
+    )
+    code_digest = models.CharField(max_length=64, unique=True)
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    note = models.CharField(max_length=500, blank=True, default='')
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.OPEN)
+    expires_at = models.DateTimeField(default=default_request_expiry)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    resulting_transaction = models.ForeignKey(
+        Transaction, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='nearby_payment_requests',
+    )
+    idempotency_hash = models.CharField(max_length=64, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'nearby_payment_requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(
+                fields=['receiver', 'status', 'created_at'],
+                name='nearby_pay_receiver_idx',
+            ),
+            models.Index(
+                fields=['status', 'expires_at'],
+                name='nearby_pay_status_expiry_idx',
+            ),
         ]
 
 
@@ -524,6 +579,7 @@ class PendingLoginRequest(models.Model):
 class OtpChallenge(models.Model):
     class Purpose(models.TextChoices):
         LOGIN = 'login', 'Login'
+        API_KEYS = 'api_keys', 'API keys'
         TRANSFER = 'transfer', 'Transfer'
         WITHDRAWAL = 'withdrawal', 'Withdrawal'
         PROVIDER_LINK = 'provider_link', 'Provider link'
@@ -955,6 +1011,7 @@ class ScheduledTransfer(models.Model):
         on_delete=models.CASCADE,
         related_name='incoming_scheduled_transfers'
     )
+    name = models.CharField(max_length=120, blank=True, default='')
     amount = models.DecimalField(max_digits=20, decimal_places=2)
     currency = models.CharField(max_length=3)
     frequency = models.CharField(
@@ -982,6 +1039,36 @@ class ScheduledTransfer(models.Model):
             models.Index(fields=['sender', 'status', 'next_execution']),
             models.Index(fields=['status', 'next_execution']),  # For background job queries
         ]
+
+
+class UtilityService(models.TextChoices):
+    WATER = 'water', 'Water Bill'
+    ELECTRICITY = 'electricity', 'Electricity'
+
+
+class UtilityPaymentStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    COMPLETED = 'completed', 'Completed'
+    FAILED = 'failed', 'Failed'
+
+
+class UtilityPayment(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='utility_payments')
+    wallet = models.ForeignKey('Wallet', on_delete=models.PROTECT, related_name='utility_payments')
+    service = models.CharField(max_length=20, choices=UtilityService.choices)
+    account_number = models.CharField(max_length=80)
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    status = models.CharField(max_length=20, choices=UtilityPaymentStatus.choices,
+                              default=UtilityPaymentStatus.PENDING)
+    provider_reference = models.CharField(max_length=100, unique=True)
+    provider_response = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'service', 'created_at'])]
 
 
 class MerchantStatus(models.TextChoices):

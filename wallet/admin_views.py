@@ -8,7 +8,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from django.db import transaction
 from django.utils import timezone
-from django.db.models import Q, Count, Avg, Sum
+from django.db.models import Q, Count, Avg, Sum, F
 from django.conf import settings
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -21,9 +21,10 @@ from wallet.models import (
     User, Wallet, WalletStatus, SupportTicket, SupportTicketMessage,
     SupportTicketStatus, SupportTicketPriority, SupportTicketCategory,
     UserKYCSubmission, KYCTier, MobileMoneyTransaction, WebhookDelivery,
-    Settlement, TransferFeeRule, FeeWaiver, ExchangeRate, AuditLog, Transaction,
+    Settlement, TransferFeeRule, FeePolicy, FeeWaiver, ExchangeRate, AuditLog, Transaction,
+    TransactionStatus,
     PushDevice, TrustedDevice, ParentalControl, PaymentRequest, SplitRequest,
-    TransferAttempt, UserNote, TransactionFlag, AlertRule, AlertEvent, AdminMessage
+    TransferAttempt, UserNote, TransactionFlag, AlertRule, AlertEvent, AdminMessage, Merchant,
 )
 from wallet.admin_serializers import (
     SupportTicketSerializer, SupportTicketCreateSerializer,
@@ -31,14 +32,14 @@ from wallet.admin_serializers import (
     SupportTicketMessageCreateSerializer, PeriodicTaskAdminSerializer,
     UserKYCSubmissionAdminSerializer, UserKYCReviewSerializer,
     MobileMoneyAdminTransactionSerializer, FailedWebhookDeliverySerializer,
-    SettlementAdminSerializer, TransferFeeRuleAdminSerializer,
+    SettlementAdminSerializer, TransferFeeRuleAdminSerializer, FeePolicyAdminSerializer,
     FeeWaiverAdminSerializer, ExchangeRateAdminSerializer,
     UserNoteSerializer, UserNoteCreateSerializer,
     TransactionFlagSerializer, TransactionFlagCreateSerializer,
     AlertRuleSerializer, AlertRuleCreateSerializer,
     AlertEventSerializer, AdminMessageSerializer, AdminMessageCreateSerializer
 )
-from wallet.serializers import UserSerializer
+from wallet.serializers import UserSerializer, MerchantSerializer
 from wallet.services.limits import apply_usage_based_limits
 from wallet.tasks import deliver_webhook_task, process_mobile_money_webhook, refresh_exchange_rates_task
 
@@ -932,32 +933,26 @@ def admin_system_health(request):
     import psutil
     import platform
 
-    # Calculate system metrics
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT COUNT(*) FROM wallet_user")
-        total_users = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM wallet_wallet")
-        total_wallets = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM wallet_transaction WHERE created_at >= %s", [timezone.now() - timedelta(hours=1)])
-        recent_transactions = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM wallet_transaction WHERE status = %s", ['pending'])
-        pending_transactions = cursor.fetchone()[0]
-
-    # Check database connectivity
     db_status = 'operational'
+    total_users = total_wallets = recent_transactions = pending_transactions = 0
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
+        total_users = User.objects.count()
+        total_wallets = Wallet.objects.count()
+        recent_transactions = Transaction.objects.filter(created_at__gte=timezone.now() - timedelta(hours=1)).count()
+        pending_transactions = Transaction.objects.filter(status='pending').count()
     except Exception:
+        logger.exception('admin_system_health_database_query_failed')
         db_status = 'degraded'
 
     # System metrics
     cpu_percent = psutil.cpu_percent(interval=1)
     memory = psutil.virtual_memory()
     memory_percent = memory.percent
+    disk = psutil.disk_usage('/')
+    load_average = getattr(psutil, 'getloadavg', lambda: (0.0, 0.0, 0.0))()
+    process = psutil.Process()
 
     # Calculate uptime (approximate from process start time)
     uptime_seconds = int(time.time() - psutil.boot_time())
@@ -965,8 +960,15 @@ def admin_system_health(request):
     uptime_hours = (uptime_seconds % 86400) // 3600
     uptime_str = f"{uptime_days}d {uptime_hours}h"
 
-    # Active connections (database connections)
-    active_connections = len(connection.queries) if connection.queries else 0
+    active_connections = 0
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database()"
+            )
+            active_connections = int(cursor.fetchone()[0])
+    except Exception:
+        logger.exception('admin_system_health_connection_count_failed')
 
     return Response({
         'api_status': 'operational',
@@ -977,6 +979,14 @@ def admin_system_health(request):
         'active_connections': active_connections,
         'memory_usage': f'{memory_percent}%',
         'cpu_usage': f'{cpu_percent}%',
+        'memory_total_bytes': memory.total,
+        'memory_available_bytes': memory.available,
+        'disk_usage': f'{disk.percent}%',
+        'disk_total_bytes': disk.total,
+        'disk_free_bytes': disk.free,
+        'load_average': [round(value, 2) for value in load_average],
+        'process_rss_bytes': process.memory_info().rss,
+        'process_threads': process.num_threads(),
         'total_users': total_users,
         'total_wallets': total_wallets,
         'recent_transactions': recent_transactions,
@@ -985,6 +995,43 @@ def admin_system_health(request):
         'python_version': platform.python_version(),
         'timestamp': timezone.now().isoformat()
     }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_merchant_detail(request, merchant_id):
+    merchant = Merchant.objects.select_related('user', 'wallet', 'subscription__plan').filter(id=merchant_id).first()
+    if not merchant:
+        return Response({'error': 'Merchant not found'}, status=status.HTTP_404_NOT_FOUND)
+    payload = MerchantSerializer(merchant).data
+    payload['summary'] = {
+        'transaction_count': Transaction.objects.filter(Q(sender__merchant_account=merchant) | Q(recipient__merchant_account=merchant)).distinct().count(),
+        'team_members': merchant.team_members.count() if hasattr(merchant, 'team_members') else 0,
+        'api_keys': merchant.api_keys.count() if hasattr(merchant, 'api_keys') else 0,
+        'bank_accounts': merchant.bank_accounts.count() if hasattr(merchant, 'bank_accounts') else 0,
+    }
+    payload['wallet_balance'] = str(merchant.wallet.get_balance())
+    payload['webhook'] = {
+        'url': merchant.webhook_url,
+        'events': merchant.webhook_events or [],
+        'deliveries': merchant.webhook_deliveries.count(),
+        'failed_deliveries': merchant.webhook_deliveries.filter(status='failed').count(),
+    }
+    payload['api_key_details'] = list(merchant.api_keys.values(
+        'id', 'mode', 'public_key', 'secret_key_prefix', 'is_active', 'created_at'
+    ))
+    payload['bank_account_details'] = list(merchant.bank_accounts.select_related('bank').values(
+        'id', 'account_name', 'account_number', 'is_verified', 'is_default',
+        bank_name=F('bank__name'), bank_code=F('bank__code')
+    ))
+    payload['recent_transactions'] = list(
+        Transaction.objects.filter(
+            Q(sender__merchant_account=merchant) | Q(recipient__merchant_account=merchant)
+        ).order_by('-created_at').values(
+            'id', 'type', 'amount', 'fee_amount', 'currency', 'status', 'created_at'
+        )[:10]
+    )
+    return Response(payload)
 
 
 @api_view(['GET', 'POST', 'DELETE'])
@@ -1080,6 +1127,51 @@ def admin_settlements(request):
         })
 
     return Response({'settlements': settlement_data}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_fee_revenue(request):
+    """Return human-readable fee revenue totals and a daily trend."""
+    time_range = request.query_params.get('time_range', '30d')
+    days = {'7d': 7, '90d': 90, '1y': 365}.get(time_range, 30)
+    now = timezone.now()
+    start = now - timedelta(days=days)
+    transactions = Transaction.objects.filter(
+        created_at__gte=start,
+        status=TransactionStatus.COMPLETED,
+    )
+    total = transactions.aggregate(value=Sum('fee_amount'))['value'] or Decimal('0')
+    count = transactions.count()
+    trend = []
+    for offset in range(days):
+        day_start = (start + timedelta(days=offset)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        day_end = day_start + timedelta(days=1)
+        daily = transactions.filter(
+            created_at__gte=day_start,
+            created_at__lt=day_end,
+        ).aggregate(value=Sum('fee_amount'))['value'] or Decimal('0')
+        trend.append({
+            'date': day_start.date().isoformat(),
+            'amount': str(daily),
+        })
+    currencies = list(
+        transactions.values('currency').annotate(total=Sum('fee_amount'), count=Count('id')).order_by('-total')
+    )
+    return Response({
+        'time_range': time_range,
+        'currency': 'GNF',
+        'total_fees': str(total),
+        'transaction_count': count,
+        'average_fee': str((total / count) if count else Decimal('0')),
+        'trend': trend,
+        'currencies': [
+            {'currency': item['currency'], 'total': str(item['total'] or Decimal('0')), 'count': item['count']}
+            for item in currencies
+        ],
+    })
 
 
 @api_view(['GET', 'POST'])
@@ -1367,7 +1459,96 @@ def admin_fee_rules_list_create(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     rule = serializer.save()
+    AuditLog.objects.create(
+        user=request.user,
+        action='admin_transfer_fee_rule_created',
+        metadata={'fee_rule_id': rule.id, 'rule': serializer.data},
+    )
     return Response(TransferFeeRuleAdminSerializer(rule).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAdminUser])
+def admin_fee_rule_detail(request, rule_id):
+    try:
+        rule = TransferFeeRule.objects.get(id=rule_id)
+    except TransferFeeRule.DoesNotExist:
+        return Response({'error': 'Transfer fee rule not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'DELETE':
+        previous = TransferFeeRuleAdminSerializer(rule).data
+        rule.delete()
+        AuditLog.objects.create(
+            user=request.user,
+            action='admin_transfer_fee_rule_deleted',
+            metadata={'fee_rule_id': rule_id, 'previous': previous},
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    previous = TransferFeeRuleAdminSerializer(rule).data
+    serializer = TransferFeeRuleAdminSerializer(rule, data=request.data, partial=True)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    changed_fields = list(serializer.validated_data.keys())
+    rule = serializer.save()
+    AuditLog.objects.create(
+        user=request.user,
+        action='admin_transfer_fee_rule_updated',
+        metadata={'fee_rule_id': rule.id, 'changed_fields': changed_fields, 'previous': previous, 'current': serializer.data},
+    )
+    return Response(TransferFeeRuleAdminSerializer(rule).data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def admin_fee_policies(request):
+    if request.method == 'GET':
+        policies = FeePolicy.objects.select_related('merchant').all()
+        serializer = FeePolicyAdminSerializer(policies, many=True)
+        return Response({'policies': serializer.data}, status=status.HTTP_200_OK)
+
+    serializer = FeePolicyAdminSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    policy = serializer.save()
+    AuditLog.objects.create(
+        user=request.user,
+        action='admin_fee_policy_created',
+        metadata={'fee_policy_id': policy.id, 'policy': serializer.data},
+    )
+    return Response(FeePolicyAdminSerializer(policy).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAdminUser])
+def admin_fee_policy_detail(request, policy_id):
+    try:
+        policy = FeePolicy.objects.select_related('merchant').get(id=policy_id)
+    except FeePolicy.DoesNotExist:
+        return Response({'error': 'Transfer fee policy not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'DELETE':
+        previous = FeePolicyAdminSerializer(policy).data
+        policy.delete()
+        AuditLog.objects.create(
+            user=request.user,
+            action='admin_fee_policy_deleted',
+            metadata={'fee_policy_id': policy_id, 'previous': previous},
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    previous = FeePolicyAdminSerializer(policy).data
+    serializer = FeePolicyAdminSerializer(policy, data=request.data, partial=True)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    changed_fields = list(serializer.validated_data.keys())
+    policy = serializer.save()
+    AuditLog.objects.create(
+        user=request.user,
+        action='admin_fee_policy_updated',
+        metadata={'fee_policy_id': policy.id, 'changed_fields': changed_fields, 'previous': previous, 'current': serializer.data},
+    )
+    return Response(FeePolicyAdminSerializer(policy).data, status=status.HTTP_200_OK)
 
 
 @extend_schema(

@@ -35,6 +35,17 @@ from wallet.services.limits import enforce_merchant_limit
 logger = logging.getLogger(__name__)
 
 
+def _queue_notification_delivery(notification):
+    try:
+        from wallet.tasks import send_notification_task
+        send_notification_task.delay(notification.id)
+    except Exception:
+        logger.exception(
+            'payment_intent_notification_dispatch_failed',
+            extra={'notification_id': notification.id, 'notification_type': notification.type},
+        )
+
+
 class PaymentIntentError(Exception):
     def __init__(self, code, message):
         self.code = code
@@ -303,7 +314,7 @@ def confirm_payment_intent(intent, payer, idempotency_key):
             },
         )
 
-    create_notification_record(
+    merchant_notification = create_notification_record(
         intent.merchant.user,
         'merchant_payment_received',
         {
@@ -311,8 +322,26 @@ def confirm_payment_intent(intent, payer, idempotency_key):
             'amount': str(intent.amount),
             'currency': intent.currency,
             'payer_handle': payer.handle,
+            'payer_display_name': payer.display_name,
+            'transaction_id': str(transaction_obj.id),
         },
     )
+    payer_notification = create_notification_record(
+        payer,
+        'payment_sent',
+        {
+            'payment_intent_id': intent.id,
+            'transaction_id': str(transaction_obj.id),
+            'recipient_handle': intent.merchant.user.handle,
+            'recipient_display_name': intent.merchant.business_name,
+            'amount': str(intent.amount),
+            'currency': intent.currency,
+            'fee_amount': str(fee_amount),
+            'balance_after': str(payer_wallet.get_balance()),
+        },
+    )
+    _queue_notification_delivery(merchant_notification)
+    _queue_notification_delivery(payer_notification)
 
     transaction.on_commit(lambda: enqueue_payment_intent_webhook(intent, 'payment_intent.succeeded'))
     return transaction_obj

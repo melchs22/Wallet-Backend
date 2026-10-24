@@ -26,10 +26,10 @@ import hashlib
 import base64
 from django.conf import settings
 from .models import (
-    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent, AppUpdatePolicy,
+    User, Wallet, Transaction, LedgerEntry, Notification, PushDevice, TrustedDevice, PendingLoginRequest, OtpChallenge, MobileMoneyWebhookEvent, AppUpdatePolicy, UtilityPayment, UtilityPaymentStatus, UtilityService,
     ProcessedRequest, AuditLog, KYCTier, UserStatus,
     TransactionType, TransactionStatus, LedgerDirection, WalletStatus, MerchantMode,
-    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus, Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule, TransactionApproval, MerchantTeamMember,
+    TransferAttempt, PaymentRequest, PaymentRequestStatus, SplitRequest, SplitParticipant, SystemSetting, Dispute, DisputeStatus, ExchangeRate, MobileMoneyTransaction, MobileMoneyTransactionType, MobileMoneyTransactionStatus, LinkedProvider, ProviderCatalog, SupportedCountry, LegalDocument, TransferFeeRule, UserKYCSubmission, ScheduledTransfer, ScheduleFrequency, ScheduledTransferStatus,     Merchant, MerchantStatus, MerchantPlan, MerchantSubscription, KYCDocument, Settlement, MerchantPayoutSchedule, TransactionApproval, MerchantTeamMember, AdminTOTP,
 )
 from .serializers import (
     UserSerializer, WalletSerializer, GoogleAuthRequestSerializer,
@@ -44,7 +44,8 @@ from .serializers import (
     SystemSettingSerializer, PaymentRequestCreateSerializer, PaymentRequestSerializer,
     SplitCreateSerializer, DisputeCreateSerializer, DisputeSerializer, DisputeResolveSerializer,
     MobileMoneyTransactionSerializer, MobileMoneyTopupSerializer, MobileMoneyWithdrawalSerializer,
-    ScheduledTransferSerializer, ScheduledTransferCreateSerializer,
+    ScheduledTransferSerializer, ScheduledTransferCreateSerializer, ScheduledTransferUpdateSerializer,
+    UtilityPaymentSerializer, UtilityPaymentCreateSerializer,
     MerchantSerializer, MerchantCreateSerializer, MerchantApprovalSerializer,
     MerchantPlanSerializer, MerchantSubscriptionSerializer, ChangePasswordSerializer,
     SupportedCountrySerializer, LegalDocumentSerializer, ProviderCatalogSerializer,
@@ -67,6 +68,7 @@ from django.core.files.storage import default_storage
 from django.db import models
 from django.db.models import Sum, Q
 from django.core.exceptions import ValidationError
+from django.core import signing
 from .authentication import issue_access_token
 from .throttles import OtpRequestThrottle, OtpVerifyThrottle
 from .services.security import (
@@ -78,9 +80,101 @@ from .services.security import (
     valid_webhook_signature,
     send_otp_sms,
 )
+from .services.admin_totp import (
+    confirm as confirm_admin_totp,
+    issue_setup_token,
+    issue_login_token,
+    load_login_user,
+    load_setup_token,
+    provision_secret,
+    provisioning_uri,
+    verify_code as verify_admin_totp,
+)
 
 # Configure structured JSON logging
 logger = logging.getLogger(__name__)
+
+
+def _admin_totp_gate(request, user):
+    record, _ = AdminTOTP.objects.get_or_create(user=user)
+    if not record.is_enabled:
+        return Response({
+            'setup_required': True,
+            'setup_token': issue_setup_token(user, record),
+            'detail': 'Set up two-factor authentication before continuing.',
+        }, status=status.HTTP_200_OK)
+    return Response({
+        'otp_required': True,
+        'login_token': issue_login_token(user),
+        'detail': 'Enter your authenticator code to continue.',
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@csrf_exempt
+@permission_classes([AllowAny])
+def admin_totp_setup(request):
+    user, record = load_setup_token(request.data.get('setup_token', ''))
+    if not user or not user.is_staff or user.status != UserStatus.ACTIVE:
+        return Response({'error': 'Invalid or expired setup token.'}, status=status.HTTP_400_BAD_REQUEST)
+    secret = provision_secret(record)
+    return Response({
+        'setup_token': request.data['setup_token'],
+        'secret': secret,
+        'otpauth_uri': provisioning_uri(user, secret),
+    })
+
+
+@api_view(['POST'])
+@csrf_exempt
+@permission_classes([AllowAny])
+def admin_totp_verify(request):
+    user = load_login_user(request.data.get('login_token', ''))
+    if not user:
+        return Response({'error': 'Invalid or expired login challenge.'}, status=status.HTTP_400_BAD_REQUEST)
+    record = AdminTOTP.objects.filter(user=user, is_enabled=True).first()
+    if not record or not verify_admin_totp(record, request.data.get('totp_code')):
+        return Response({'error': 'Invalid authenticator code.'}, status=status.HTTP_401_UNAUTHORIZED)
+    login(request, user)
+    wallet, created = Wallet.objects.get_or_create(
+        user=user, defaults={'currency': 'GNF', 'status': WalletStatus.ACTIVE},
+    )
+    if created:
+        LedgerEntry.objects.create(wallet=wallet, transaction=None, direction=LedgerDirection.CREDIT, amount=Decimal('0.00'))
+    AuditLog.objects.create(user=user, action='admin_login', metadata={'method': 'username_password_totp'})
+    request.session.save()
+    return Response({
+        'user': UserSerializer(user).data,
+        'wallet': WalletDetailSerializer(wallet).data,
+        'access_token': issue_access_token(user),
+        'must_change_password': bool(user.must_change_password),
+    })
+
+
+@api_view(['POST'])
+@csrf_exempt
+@permission_classes([AllowAny])
+def admin_totp_confirm(request):
+    user, record = load_setup_token(request.data.get('setup_token', ''))
+    if not user or not user.is_staff or user.status != UserStatus.ACTIVE:
+        return Response({'error': 'Invalid or expired setup token.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not verify_admin_totp(record, request.data.get('totp_code')):
+        return Response({'error': 'Invalid authenticator code.'}, status=status.HTTP_400_BAD_REQUEST)
+    confirm_admin_totp(record)
+    login(request, user)
+    wallet, created = Wallet.objects.get_or_create(
+        user=user, defaults={'currency': 'GNF', 'status': WalletStatus.ACTIVE},
+    )
+    if created:
+        LedgerEntry.objects.create(wallet=wallet, transaction=None, direction=LedgerDirection.CREDIT, amount=Decimal('0.00'))
+    AuditLog.objects.create(user=user, action='admin_totp_enabled', metadata={'method': 'authenticator_app'})
+    request.session.save()
+    return Response({
+        'user': UserSerializer(user).data,
+        'wallet': WalletDetailSerializer(wallet).data,
+        'access_token': issue_access_token(user),
+        'must_change_password': bool(user.must_change_password),
+    })
 
 
 def user_has_approved_kyc(user):
@@ -103,6 +197,16 @@ def verify_qr_signature(payload_json, signature):
         hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(signature, expected_signature)
+
+
+def _workspace_merchant_for_user(user):
+    merchant = Merchant.objects.filter(user=user).first()
+    if merchant:
+        return merchant
+    membership = MerchantTeamMember.objects.filter(
+        user=user, is_active=True, accepted_at__isnull=False,
+    ).select_related('merchant').first()
+    return membership.merchant if membership else None
 
 
 @api_view(['GET'])
@@ -176,6 +280,7 @@ class EmailSignupView(APIView):
         transaction_pin = serializer.validated_data.get('transaction_pin', '').strip()
         country_code = serializer.validated_data.get('country_code', '').strip().upper()
         device_id = (serializer.validated_data.get('device_id') or '').strip()
+        language_code = serializer.validated_data.get('language_code', 'en')
 
         if country_code and not SupportedCountry.objects.filter(code=country_code, active=True).exists():
             return Response({'error': 'This country is not currently supported.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -196,6 +301,7 @@ class EmailSignupView(APIView):
                 kyc_tier=KYCTier.TIER_0,
                 status=UserStatus.ACTIVE,
                 current_device_id=device_id or None,
+                language_code=language_code,
             )
             # Set transaction PIN
             if transaction_pin:
@@ -216,12 +322,39 @@ class EmailSignupView(APIView):
                 metadata={'method': 'email_password', 'handle': handle},
             )
 
+            try:
+                from wallet.services.email import branded_email, send_email
+                locale = (user.language_code or 'en').split('-')[0]
+                welcome_title = 'Bienvenue chez DSD PAY' if locale == 'fr' else 'Welcome to DSD PAY'
+                welcome_body = (
+                    '<p>Votre compte marchand a été créé avec succès.</p><p>Vous pouvez maintenant gérer vos paiements, transactions et intégrations depuis votre tableau de bord.</p>'
+                    if locale == 'fr'
+                    else '<p>Your merchant account has been created successfully.</p><p>You can now manage payments, transactions, and integrations from your dashboard.</p>'
+                )
+                send_email(user.email, welcome_title, branded_email(welcome_title, welcome_body))
+            except Exception:
+                logger.exception('Failed to send merchant signup welcome email')
+
+            challenge, otp_code = create_otp_challenge(user, OtpChallenge.Purpose.LOGIN, request)
+            try:
+                from wallet.services.email import branded_email, send_email
+                locale = (user.language_code or 'en').split('-')[0]
+                otp_title = 'Votre code DSD PAY pour continuer' if locale == 'fr' else 'Your DSD PAY verification code'
+                otp_label = 'Votre code de vérification est' if locale == 'fr' else 'Your verification code is'
+                otp_body = f'<p>{otp_label}:</p><p style="font-size:32px;font-weight:bold;letter-spacing:8px">{otp_code}</p><p>{"Ce code expire dans 5 minutes." if locale == "fr" else "This code expires in 5 minutes."}</p>'
+                send_email(user.email, otp_title, branded_email(otp_title, otp_body))
+            except Exception:
+                logger.exception('Failed to send merchant signup verification email')
+
         login(request, user)
         response_data = {
             'user': UserSerializer(user).data,
             'wallet': WalletSerializer(user.wallet).data,
             'access_token': issue_access_token(user, device_id=device_id or None),
             'is_new_user': True,
+            'otp_required': True,
+            'challenge_id': str(challenge.request_id),
+            'expires_at': challenge.expires_at,
         }
         request.session.save()
         return Response(response_data, status=status.HTTP_201_CREATED)
@@ -331,6 +464,14 @@ class EmailLoginView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        if getattr(settings, 'RECAPTCHA_SECRET_KEY', '') and not serializer.validated_data.get('device_id'):
+            from wallet.services.recaptcha import verify_recaptcha
+            captcha_token = serializer.validated_data.get('captcha_token') or ''
+            if not captcha_token:
+                return Response({'error': 'The security check is required before logging in. Refresh the page and try again.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not verify_recaptcha(captcha_token, request.META.get('REMOTE_ADDR')):
+                return Response({'error': 'The security check failed. Please refresh the page and try again.'}, status=status.HTTP_400_BAD_REQUEST)
+
         identifier = (serializer.validated_data.get('identifier') or serializer.validated_data.get('email') or '').strip()
         password = serializer.validated_data['password']
         country_code = serializer.validated_data.get('country_code', '').strip().upper()
@@ -354,6 +495,39 @@ class EmailLoginView(APIView):
         if user.status != UserStatus.ACTIVE:
             return Response({'error': 'Account is not active.'}, status=status.HTTP_403_FORBIDDEN)
 
+        merchant_workspace_login = bool(
+            serializer.validated_data.get('merchant_login') and (
+                hasattr(user, 'merchant_account')
+                or MerchantTeamMember.objects.filter(user=user, is_active=True).exists()
+            )
+        )
+        if merchant_workspace_login:
+            device_id = ''
+
+        if serializer.validated_data.get('merchant_login') and hasattr(user, 'merchant_account'):
+            from wallet.services.email import branded_email, send_email
+            from wallet.services.security import create_otp_challenge, verify_otp_challenge
+            challenge_id = serializer.validated_data.get('otp_challenge_id')
+            otp_code = serializer.validated_data.get('otp_code')
+            if challenge_id and otp_code:
+                try:
+                    challenge = OtpChallenge.objects.get(
+                        request_id=challenge_id, user=user, purpose=OtpChallenge.Purpose.LOGIN,
+                    )
+                except OtpChallenge.DoesNotExist:
+                    return Response({'error': 'Invalid or expired verification code.'}, status=status.HTTP_400_BAD_REQUEST)
+                verified, error = verify_otp_challenge(challenge, otp_code)
+                if not verified:
+                    return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                challenge, code = create_otp_challenge(user, OtpChallenge.Purpose.LOGIN, request)
+                language = getattr(user, 'language_code', 'en').split('-')[0]
+                title = 'Votre code de connexion DSD PAY' if language == 'fr' else 'Your DSD PAY sign-in code'
+                label = 'Votre code à usage unique est' if language == 'fr' else 'Your one-time sign-in code is'
+                if not send_email(user.email, title, branded_email(title, f'<p>{label}:</p><p style="font-size:32px;font-weight:bold;letter-spacing:8px">{code}</p><p>This code expires in 5 minutes.</p>')):
+                    return Response({'error': 'We could not send the verification email. Please try again.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                return Response({'status': 'otp_required', 'challenge_id': str(challenge.request_id), 'expires_at': challenge.expires_at}, status=status.HTTP_202_ACCEPTED)
+
         MerchantTeamMember.objects.filter(
             user=user, is_active=True, accepted_at__isnull=True,
         ).update(accepted_at=timezone.now())
@@ -362,7 +536,7 @@ class EmailLoginView(APIView):
             user=user, device_id=device_id, is_trusted=True, revoked_at__isnull=True,
         ).first() if device_id else None
         trusted_exists = user.trusted_devices.filter(is_trusted=True, revoked_at__isnull=True).exists()
-        if not trusted_exists and user.current_device_id:
+        if not merchant_workspace_login and not trusted_exists and user.current_device_id:
             user.current_device_id = None
             user.save(update_fields=['current_device_id'])
         public_key_pem = (serializer.validated_data.get('public_key_pem') or '').strip()
@@ -381,7 +555,7 @@ class EmailLoginView(APIView):
                     device.save(update_fields=['device_id'])
                 else:
                     device_id = device.device_id
-        if device is None and trusted_exists:
+        if device is None and trusted_exists and not merchant_workspace_login:
             if not device_id or not public_key_pem:
                 return Response({'error': 'A device ID and public signing key are required for new-device login.'}, status=status.HTTP_400_BAD_REQUEST)
             pending = PendingLoginRequest.objects.filter(
@@ -465,6 +639,14 @@ class EmailLoginView(APIView):
             'access_token': issue_access_token(user, device_id=device_id or None),
             'is_new_user': False,
         }
+        membership = MerchantTeamMember.objects.select_related('merchant').filter(
+            user=user, is_active=True, accepted_at__isnull=False,
+        ).first()
+        if membership is not None:
+            response_data['merchant_workspace'] = {
+                'merchant_id': str(membership.merchant.id),
+                'role': membership.role,
+            }
         request.session.save()
         return Response(response_data, status=status.HTTP_200_OK)
 
@@ -501,6 +683,9 @@ class MerchantLoginOtpVerifyView(APIView):
         if not verified:
             return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
 
+        MerchantTeamMember.objects.filter(
+            user=user, is_active=True, accepted_at__isnull=True,
+        ).update(accepted_at=timezone.now())
         login(request, user)
         wallet = getattr(user, 'wallet', None)
         if wallet is None:
@@ -518,6 +703,14 @@ class MerchantLoginOtpVerifyView(APIView):
             'access_token': issue_access_token(user, device_id=device_id),
             'is_new_user': False,
         }
+        membership = MerchantTeamMember.objects.select_related('merchant').filter(
+            user=user, is_active=True, accepted_at__isnull=False,
+        ).first()
+        if membership is not None:
+            response_data['merchant_workspace'] = {
+                'merchant_id': str(membership.merchant.id),
+                'role': membership.role,
+            }
         request.session.save()
         AuditLog.objects.create(user=user, action='login', metadata={'method': 'merchant_sms_otp'})
         return Response(response_data, status=status.HTTP_200_OK)
@@ -716,6 +909,89 @@ def csrf_cookie_view(request):
     )
 
 
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def password_reset_request(request):
+    if getattr(settings, 'RECAPTCHA_SECRET_KEY', ''):
+        from wallet.services.recaptcha import verify_recaptcha
+        if not verify_recaptcha(request.data.get('captcha_token'), request.META.get('REMOTE_ADDR')):
+            return Response({'error': 'Please complete the security check and try again.'}, status=status.HTTP_400_BAD_REQUEST)
+    email = str(request.data.get('email') or '').strip().lower()
+    user = User.objects.filter(email__iexact=email, status=UserStatus.ACTIVE).first()
+    if user:
+        token = signing.dumps({'user_id': user.pk, 'email': user.email}, salt='wallet-password-reset')
+        from wallet.services.email import branded_email, send_email
+        language = getattr(user, 'language_code', 'en').split('-')[0]
+        title = 'Réinitialisez votre mot de passe DSD PAY' if language == 'fr' else 'Reset your DSD PAY password'
+        url = f'{getattr(settings, "FRONTEND_ORIGIN", "https://dsdwallet.com")}/auth/reset-password?token={token}'
+        body = '<p>Use the secure link below to choose a new password. The link expires in one hour.</p>'
+        if language == 'fr':
+            body = '<p>Utilisez le lien sécurisé ci-dessous pour choisir un nouveau mot de passe. Le lien expire dans une heure.</p>'
+        send_email(user.email, title, branded_email(title, body, url, 'Reset password' if language != 'fr' else 'Réinitialiser le mot de passe'))
+    return Response({'detail': 'If an account exists for that email, a reset link has been sent.'})
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def password_reset_confirm(request):
+    if getattr(settings, 'RECAPTCHA_SECRET_KEY', ''):
+        from wallet.services.recaptcha import verify_recaptcha
+        if not verify_recaptcha(request.data.get('captcha_token'), request.META.get('REMOTE_ADDR')):
+            return Response({'error': 'Please complete the security check and try again.'}, status=status.HTTP_400_BAD_REQUEST)
+    token = str(request.data.get('token') or '')
+    password = str(request.data.get('password') or '')
+    confirm = str(request.data.get('confirm_password') or '')
+    if len(password) < 8 or password != confirm:
+        return Response({'error': 'Passwords must match and be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        payload = signing.loads(token, salt='wallet-password-reset', max_age=3600)
+        user = User.objects.get(pk=payload['user_id'], email__iexact=payload['email'], status=UserStatus.ACTIVE)
+    except (signing.BadSignature, signing.SignatureExpired, User.DoesNotExist, KeyError):
+        return Response({'error': 'This reset link is invalid or expired.'}, status=status.HTTP_400_BAD_REQUEST)
+    user.set_password(password)
+    user.must_change_password = False
+    user.save(update_fields=['password', 'must_change_password'])
+    return Response({'detail': 'Password updated successfully.'})
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def team_invitation_confirm(request):
+    token = str(request.data.get('token') or '')
+    password = str(request.data.get('password') or '')
+    confirm = str(request.data.get('confirm_password') or '')
+    if len(password) < 8 or password != confirm:
+        return Response(
+            {'error': 'Passwords must match and be at least 8 characters.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        payload = signing.loads(token, salt='wallet-team-invite', max_age=604800)
+        member = MerchantTeamMember.objects.select_related('user').get(
+            pk=payload['member_id'],
+            user_id=payload['user_id'],
+            email__iexact=payload['email'],
+            is_active=True,
+        )
+    except (
+        signing.BadSignature,
+        signing.SignatureExpired,
+        MerchantTeamMember.DoesNotExist,
+        KeyError,
+    ):
+        return Response(
+            {'error': 'This invitation link is invalid or expired.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    user = member.user
+    user.set_password(password)
+    user.must_change_password = False
+    user.save(update_fields=['password', 'must_change_password'])
+    member.accepted_at = timezone.now()
+    member.save(update_fields=['accepted_at'])
+    return Response({'detail': 'Password set successfully. You can now sign in.'})
+
+
 @extend_schema(
     responses={200: dict},
     tags=['Authentication']
@@ -786,6 +1062,9 @@ class AdminLoginView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        totp_response = _admin_totp_gate(request, user)
+        if totp_response:
+            return totp_response
         login(request, user)
 
         AuditLog.objects.create(
@@ -854,6 +1133,9 @@ def admin_auth_login(request):
     if user.status != UserStatus.ACTIVE:
         return Response({'error': 'Account is not active'}, status=status.HTTP_403_FORBIDDEN)
 
+    totp_response = _admin_totp_gate(request, user)
+    if totp_response:
+        return totp_response
     login(request, user)
     AuditLog.objects.create(user=user, action='admin_login', metadata={'method': 'username_password'})
 
@@ -948,6 +1230,24 @@ class MeView(APIView):
         }
         
         return Response(response_data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        user = request.user
+        language_code = request.data.get('language_code')
+        if language_code is not None:
+            language_code = str(language_code).strip().lower()
+            if language_code not in {'en', 'fr'}:
+                return Response(
+                    {'error': 'Unsupported language.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            user.language_code = language_code
+            user.save(update_fields=['language_code'])
+        serializer = UserSerializer(user, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        return Response({'user': serializer.data}, status=status.HTTP_200_OK)
     
 
 @extend_schema(
@@ -1092,14 +1392,22 @@ class PushDeviceView(APIView):
                 return Response({'error': str(error)}, status=status.HTTP_409_CONFLICT)
 
         from .models import PushDevice
+        token = serializer.validated_data['token']
+        device_id = serializer.validated_data.get('device_id', '')
+        if device_id:
+            PushDevice.objects.filter(
+                user=request.user,
+                device_id=device_id,
+                active=True,
+            ).exclude(token=token).update(active=False)
         device, _ = PushDevice.objects.update_or_create(
-            token=serializer.validated_data['token'],
+            token=token,
             defaults={
                 'user': request.user,
-                'device_id': serializer.validated_data.get('device_id', ''),
+                'device_id': device_id,
                 'platform': serializer.validated_data.get('platform', ''),
                 'device_name': serializer.validated_data.get('device_name', ''),
-                'language_code': serializer.validated_data.get('language_code', 'fr')[:10].lower(),
+                'language_code': request.user.language_code,
                 'active': True,
             },
         )
@@ -1711,19 +2019,6 @@ class TransferView(APIView):
                     metadata={'recipient_id': recipient.id}
                 )
                 
-                # Notify recipient about incoming transfer
-                create_notification(
-                    recipient,
-                    'incoming_transfer',
-                    {
-                        'sender_handle': sender.handle,
-                        'sender_display_name': sender.display_name,
-                        'amount': str(amount),
-                        'currency': currency,
-                        'note': note,
-                    },
-                )
-                
                 return Response(
                     {'status': 'pending_approval', 'approval_id': approval.id},
                     status=status.HTTP_202_ACCEPTED,
@@ -1974,7 +2269,18 @@ class NotificationListView(APIView):
         paginated_notifications = paginator.paginate_queryset(notifications, request)
         
         serializer = NotificationSerializer(paginated_notifications, many=True)
-        return paginator.get_paginated_response(serializer.data)
+        from wallet.services.notifications import localized_notification_payload
+        results = [
+            {
+                **item,
+                'payload': localized_notification_payload(
+                    notification,
+                    request.user.language_code,
+                ),
+            }
+            for notification, item in zip(paginated_notifications, serializer.data)
+        ]
+        return paginator.get_paginated_response(results)
 
 
 class NotificationDetailView(APIView):
@@ -1989,8 +2295,14 @@ class NotificationDetailView(APIView):
             notification = request.user.notifications.get(id=id)
             notification.read_at = timezone.now()
             notification.save()
+            from wallet.services.notifications import localized_notification_payload
+            data = NotificationSerializer(notification).data
+            data['payload'] = localized_notification_payload(
+                notification,
+                request.user.language_code,
+            )
             return Response(
-                NotificationSerializer(notification).data,
+                data,
                 status=status.HTTP_200_OK
             )
         except Notification.DoesNotExist:
@@ -2200,6 +2512,56 @@ class ReversalView(APIView):
                         'currency': original_transaction.currency
                     }
                 )
+
+                amount_text = str(original_transaction.amount)
+                currency = original_transaction.currency
+                transaction_id_text = str(original_transaction.id)
+                reversal_id_text = str(reversal_transaction.id)
+                credited_user = original_transaction.sender
+                debited_user = original_transaction.recipient
+                create_notification(
+                    credited_user,
+                    'transaction_reversed',
+                    {
+                        'transaction_id': transaction_id_text,
+                        'reversal_transaction_id': reversal_id_text,
+                        'amount': amount_text,
+                        'currency': currency,
+                        'reason': reason,
+                        'counterparty_display_name': debited_user.display_name or debited_user.handle,
+                        'message_en': (
+                            f'Your payment of {amount_text} {currency} to '
+                            f'{debited_user.display_name or debited_user.handle} was reversed. Reason: {reason}.'
+                        ),
+                        'message_fr': (
+                            f'Votre paiement de {amount_text} {currency} à '
+                            f'{debited_user.display_name or debited_user.handle} a été annulé. Motif : {reason}.'
+                        ),
+                    },
+                )
+                if debited_user.id != credited_user.id:
+                    create_notification(
+                        debited_user,
+                        'transaction_reversed',
+                        {
+                            'transaction_id': transaction_id_text,
+                            'reversal_transaction_id': reversal_id_text,
+                            'amount': amount_text,
+                            'currency': currency,
+                            'reason': reason,
+                            'counterparty_display_name': credited_user.display_name or credited_user.handle,
+                            'message_en': (
+                                f'The payment of {amount_text} {currency} from '
+                                f'{credited_user.display_name or credited_user.handle} was reversed and debited from your wallet. '
+                                f'Reason: {reason}.'
+                            ),
+                            'message_fr': (
+                                f'Le paiement de {amount_text} {currency} reçu de '
+                                f'{credited_user.display_name or credited_user.handle} a été annulé et débité de votre portefeuille. '
+                                f'Motif : {reason}.'
+                            ),
+                        },
+                    )
 
                 # Log the reversal
                 logger.info(
@@ -3534,6 +3896,20 @@ def pay_payment_request(request, request_id):
                 'transaction_id': str(transaction_obj.id)
             }
         )
+        create_notification(
+            payer,
+            'payment_sent',
+            {
+                'recipient_handle': requester.handle,
+                'recipient_display_name': requester.display_name,
+                'amount': str(amount),
+                'currency': currency,
+                'fee_amount': '0.00',
+                'balance_after': str(payer_wallet.get_balance()),
+                'payment_request_id': payment_request.id,
+                'transaction_id': str(transaction_obj.id),
+            },
+        )
         
         return Response(
             PaymentRequestSerializer(payment_request).data,
@@ -3883,19 +4259,6 @@ def pay_qr_payload(request):
             currency=currency,
             note=note,
             metadata={'recipient_id': recipient.id, 'qr_payload': payload}
-        )
-        
-        # Notify recipient about incoming QR payment
-        create_notification(
-            recipient,
-            'incoming_qr_payment',
-            {
-                'payer_handle': request.user.handle,
-                'payer_display_name': request.user.display_name,
-                'amount': str(amount_decimal),
-                'currency': currency,
-                'note': note,
-            },
         )
         
         return Response(
@@ -5046,6 +5409,7 @@ def create_scheduled_transfer(request):
     end_date = serializer.validated_data.get('end_date')
     max_executions = serializer.validated_data.get('max_executions')
     note = serializer.validated_data.get('note', '')
+    name = serializer.validated_data.get('name', '').strip()
 
     try:
         with transaction.atomic():
@@ -5090,6 +5454,7 @@ def create_scheduled_transfer(request):
             scheduled_transfer = ScheduledTransfer.objects.create(
                 sender=request.user,
                 recipient=recipient,
+                name=name or f'Transfer to {recipient.display_name}',
                 amount=amount,
                 currency=currency,
                 frequency=frequency,
@@ -5183,6 +5548,93 @@ def get_scheduled_transfer_detail(request, transfer_id):
             {'error': 'Scheduled transfer not found'},
             status=status.HTTP_404_NOT_FOUND
         )
+
+
+@extend_schema(
+    request=ScheduledTransferUpdateSerializer,
+    responses={200: ScheduledTransferSerializer, 400: dict, 404: dict},
+    tags=['Scheduled Transfers']
+)
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def update_scheduled_transfer(request, transfer_id):
+    try:
+        scheduled_transfer = ScheduledTransfer.objects.get(id=transfer_id, sender=request.user)
+    except ScheduledTransfer.DoesNotExist:
+        return Response({'error': 'Scheduled transfer not found'}, status=status.HTTP_404_NOT_FOUND)
+    if scheduled_transfer.status in (ScheduledTransferStatus.CANCELLED, ScheduledTransferStatus.COMPLETED):
+        return Response({'error': 'Completed or cancelled schedules cannot be edited'}, status=status.HTTP_400_BAD_REQUEST)
+    serializer = ScheduledTransferUpdateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    for field, value in serializer.validated_data.items():
+        if field == 'name':
+            value = value.strip()
+        setattr(scheduled_transfer, field, value)
+    scheduled_transfer.save()
+    AuditLog.objects.create(user=request.user, action='scheduled_transfer_updated',
+                            metadata={'scheduled_transfer_id': transfer_id,
+                                      'fields': list(serializer.validated_data)})
+    return Response(ScheduledTransferSerializer(scheduled_transfer).data)
+
+
+@extend_schema(
+    request=UtilityPaymentCreateSerializer,
+    responses={201: UtilityPaymentSerializer, 400: dict, 403: dict, 404: dict},
+    tags=['Utilities']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_utility_payment(request):
+    serializer = UtilityPaymentCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    if step_up_required(request, OtpChallenge.Purpose.TRANSFER):
+        return Response({'code': 'otp_required', 'purpose': OtpChallenge.Purpose.TRANSFER,
+                         'error': 'Fresh device verification is required before paying a utility bill.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    data = serializer.validated_data
+    currency = data['currency'].upper()
+    if data['service'] not in UtilityService.values:
+        return Response({'error': 'Unsupported utility service'}, status=status.HTTP_400_BAD_REQUEST)
+    with transaction.atomic():
+        wallet = Wallet.objects.select_for_update().get(user=request.user, currency=currency)
+        if wallet.get_balance() < data['amount']:
+            return Response({'error': 'Insufficient funds'}, status=status.HTTP_400_BAD_REQUEST)
+        utility = UtilityPayment.objects.create(
+            user=request.user, wallet=wallet, service=data['service'],
+            account_number=data['account_number'].strip(), amount=data['amount'],
+            currency=currency, provider_reference=f'UTIL-{uuid.uuid4().hex[:16]}',
+            status=UtilityPaymentStatus.COMPLETED, completed_at=timezone.now(),
+        )
+        utility_tx = Transaction.objects.create(
+            type=TransactionType.UTILITY_PAYMENT, sender=request.user,
+            recipient=request.user,
+            amount=data['amount'], currency=currency, note=f'{utility.get_service_display()} payment',
+            status=TransactionStatus.COMPLETED,
+        )
+        LedgerEntry.objects.create(wallet=wallet, transaction=utility_tx,
+                                   direction=LedgerDirection.DEBIT, amount=data['amount'])
+        AuditLog.objects.create(user=request.user, action='utility_payment_completed',
+                                metadata={'utility_payment_id': utility.id, 'service': data['service'],
+                                          'account_number': data['account_number'], 'amount': str(data['amount'])})
+    create_notification(
+        request.user,
+        'utility_payment_completed',
+        {
+            'utility_payment_id': utility.id,
+            'transaction_id': str(utility_tx.id),
+            'service': utility.get_service_display(),
+            'amount': str(data['amount']),
+            'currency': currency,
+        },
+    )
+    return Response(UtilityPaymentSerializer(utility).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_utility_payments(request):
+    return Response(UtilityPaymentSerializer(
+        UtilityPayment.objects.filter(user=request.user), many=True).data)
 
 
 @extend_schema(
@@ -5425,7 +5877,11 @@ def get_merchant_account(request):
     Get the current user's merchant account.
     """
     try:
-        merchant = Merchant.objects.get(user=request.user)
+        merchant = _workspace_merchant_for_user(request.user)
+        if merchant is None:
+            raise Merchant.DoesNotExist
+        if request.method == 'PATCH' and merchant.user_id != request.user.id:
+            return Response({'error': 'Only the merchant owner can update this account.'}, status=status.HTTP_403_FORBIDDEN)
         if not merchant.public_identifier:
             merchant_public_identifier(merchant)
         if request.method == 'PATCH':
@@ -5610,7 +6066,7 @@ def generate_merchant_qr(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def merchant_dashboard(request):
-    merchant = Merchant.objects.filter(user=request.user).first()
+    merchant = _workspace_merchant_for_user(request.user)
     if not merchant:
         return Response({'error': 'Merchant account not found'}, status=status.HTTP_404_NOT_FOUND)
     environment = (request.query_params.get('mode') or request.query_params.get('environment') or MerchantMode.SANDBOX).lower()
@@ -5708,6 +6164,26 @@ def merchant_credentials(request):
             'secret_key_available': bool(api_key.secret_key_encrypted),
             'created_at': api_key.created_at,
         })
+    if request.method == 'POST':
+        from wallet.services.security import create_otp_challenge, verify_otp_challenge
+        challenge_id = request.data.get('otp_challenge_id')
+        otp_code = request.data.get('otp_code')
+        if not challenge_id or not otp_code:
+            challenge, code = create_otp_challenge(request.user, OtpChallenge.Purpose.API_KEYS, request)
+            from wallet.services.email import branded_email, send_email
+            language = getattr(request.user, 'language_code', 'en').split('-')[0]
+            title = 'Votre code API DSD PAY' if language == 'fr' else 'Your DSD PAY API security code'
+            body = f'<p>{"Votre code est" if language == "fr" else "Your code is"}:</p><p style="font-size:32px;font-weight:bold;letter-spacing:8px">{code}</p><p>{"Ce code expire dans 5 minutes." if language == "fr" else "This code expires in 5 minutes."}</p>'
+            if not send_email(request.user.email, title, branded_email(title, body)):
+                return Response({'error': 'We could not send the verification email.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response({'status': 'otp_required', 'challenge_id': str(challenge.request_id), 'expires_at': challenge.expires_at}, status=status.HTTP_202_ACCEPTED)
+        try:
+            challenge = OtpChallenge.objects.get(request_id=challenge_id, user=request.user, purpose=OtpChallenge.Purpose.API_KEYS)
+        except OtpChallenge.DoesNotExist:
+            return Response({'error': 'Invalid or expired verification code.'}, status=status.HTTP_400_BAD_REQUEST)
+        verified, error = verify_otp_challenge(challenge, otp_code)
+        if not verified:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
     try:
         public_key, secret_key = generate_merchant_api_keys(merchant, mode)
     except ValueError as exc:
